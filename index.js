@@ -1,12 +1,14 @@
 const { Client, GatewayIntentBits, Events } = require('discord.js');
 require('dotenv').config();
 const db = require('./database.js');
+const { registerCommands } = require('./deploy-commands.js');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-client.once(Events.ClientReady, () => {
+client.once(Events.ClientReady, async () => {
     console.log('Bot is online!');
     console.log('Database ready!');
+    await registerCommands();
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
