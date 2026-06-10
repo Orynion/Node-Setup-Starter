@@ -1,5 +1,9 @@
 {
   "name": "node-app",
   "version": "1.0.0",
-  "main": "index.js"
+  "main": "index.js",
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "discord.js": "^14.26.4"
+  }
 }
