@@ -40,5 +40,6 @@ db.exec(`
 `);
 
 try { db.exec(`ALTER TABLE companies ADD COLUMN all_time_earnings REAL NOT NULL DEFAULT 0`); } catch (_) {}
+try { db.exec(`ALTER TABLE companies ADD COLUMN emoji TEXT NOT NULL DEFAULT '🏢'`); } catch (_) {}
 
 module.exports = db;

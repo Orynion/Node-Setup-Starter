@@ -59,8 +59,10 @@ const commands = [
         .setDescription('Admin: Register a new company IPO')
         .addStringOption(o => o.setName('ticker').setDescription('Ticker symbol (e.g. ACME)').setRequired(true))
         .addStringOption(o => o.setName('name').setDescription('Company name').setRequired(true))
+        .addUserOption(o => o.setName('owner').setDescription('Company owner').setRequired(true))
         .addNumberOption(o => o.setName('price').setDescription('IPO share price').setRequired(true).setMinValue(0.01))
-        .addIntegerOption(o => o.setName('supply').setDescription('Total share supply').setRequired(true).setMinValue(1)),
+        .addIntegerOption(o => o.setName('supply').setDescription('Total share supply').setRequired(true).setMinValue(1))
+        .addStringOption(o => o.setName('emoji').setDescription('Company emoji (e.g. 🚀)').setRequired(false)),
 
     new SlashCommandBuilder()
         .setName('admin-settle')

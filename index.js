@@ -388,28 +388,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const name = interaction.options.getString('name');
+            const owner = interaction.options.getUser('owner');
             const price = interaction.options.getNumber('price');
             const supply = interaction.options.getInteger('supply');
+            const emoji = interaction.options.getString('emoji') ?? '🏢';
 
             const existing = db.prepare('SELECT ticker FROM companies WHERE ticker = ?').get(ticker);
             if (existing) return interaction.reply({ content: `Company **${ticker}** already exists.`, ephemeral: true });
 
             db.prepare(`INSERT INTO companies
-                (ticker, company_name, owner_id, ipo_share_price, current_price, total_supply, shares_in_circulation, bot_share_reserve, pending_cashout_tokens, all_time_earnings)
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, 0)
-            `).run(ticker, name, interaction.user.id, price, price, supply, supply);
+                (ticker, company_name, owner_id, ipo_share_price, current_price, total_supply, shares_in_circulation, bot_share_reserve, pending_cashout_tokens, all_time_earnings, emoji)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?)
+            `).run(ticker, name, owner.id, price, price, supply, supply, emoji);
 
             recordPrice(ticker, price);
 
             return interaction.reply({
                 embeds: [{
-                    title: '🏢 New Company Listed!',
+                    title: `${emoji} New Company Listed!`,
                     fields: [
                         { name: 'Ticker', value: ticker, inline: true },
                         { name: 'Name', value: name, inline: true },
                         { name: 'IPO Price', value: `${fmt(price)} tokens`, inline: true },
                         { name: 'Total Supply', value: supply.toLocaleString(), inline: true },
-                        { name: 'Owner', value: interaction.user.username, inline: true },
+                        { name: 'Owner', value: owner.username, inline: true },
                     ],
                     color: 0x57F287,
                 }]
