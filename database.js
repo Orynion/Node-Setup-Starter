@@ -18,7 +18,8 @@ db.exec(`
         total_supply INTEGER NOT NULL,
         shares_in_circulation INTEGER NOT NULL,
         bot_share_reserve INTEGER NOT NULL,
-        pending_cashout_tokens REAL NOT NULL DEFAULT 0
+        pending_cashout_tokens REAL NOT NULL DEFAULT 0,
+        all_time_earnings REAL NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS price_history (
@@ -37,5 +38,7 @@ db.exec(`
         timestamp INTEGER NOT NULL
     );
 `);
+
+try { db.exec(`ALTER TABLE companies ADD COLUMN all_time_earnings REAL NOT NULL DEFAULT 0`); } catch (_) {}
 
 module.exports = db;
