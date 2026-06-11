@@ -216,6 +216,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             // Process bot pool shares
             let newPrice = company.current_price;
             if (sharesFromBot > 0) {
+                const ownerEarnings = sharesFromBot * company.current_price;
                 newPrice = adjustPrice(company.current_price, sharesFromBot, 'up');
                 db.prepare(`UPDATE companies SET
                     bot_share_reserve = bot_share_reserve - ?,
@@ -224,7 +225,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     pending_cashout_tokens = pending_cashout_tokens + ?,
                     all_time_earnings = all_time_earnings + ?
                     WHERE ticker = ?`
-                ).run(sharesFromBot, sharesFromBot, newPrice, sharesFromBot * company.current_price, sharesFromBot * company.current_price, ticker);
+                ).run(sharesFromBot, sharesFromBot, newPrice, ownerEarnings, ownerEarnings, ticker);
+                getOrCreateUser(company.owner_id);
+                db.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?').run(ownerEarnings, company.owner_id);
                 recordPrice(ticker, newPrice);
             }
 
