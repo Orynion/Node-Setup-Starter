@@ -494,7 +494,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             for (let i = 0; i <= yTicks; i++) {
                 const p = yMax - (i / yTicks) * yRange;
                 const y = PAD.top + (i / yTicks) * cH;
-                ctx.fillText(`$${p.toFixed(2)}`, PAD.left - 8, y + 4);
+                ctx.fillText(`$${fmt(p)}`, PAD.left - 8, y + 4);
             }
 
             // X axis labels (up to 5 evenly spaced)
@@ -518,7 +518,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             ctx.fillStyle = '#e6edf3';
             ctx.font = 'bold 20px sans-serif';
             ctx.textAlign = 'left';
-            ctx.fillText(`${ticker}  ${company.company_name}`, PAD.left, 38);
+            ctx.fillText(company.company_name, PAD.left, 38);
 
             // Price change badge
             const priceChange = prices[prices.length - 1] - prices[0];
@@ -534,7 +534,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             ctx.fillStyle = '#00ff88';
             ctx.font = 'bold 11px sans-serif';
             ctx.textAlign = lastX > W - 100 ? 'right' : 'left';
-            ctx.fillText(`$${prices[prices.length - 1].toFixed(2)}`, lastX + (lastX > W - 100 ? -10 : 10), lastY - 8);
+            ctx.fillText(`$${fmt(prices[prices.length - 1])}`, lastX + (lastX > W - 100 ? -10 : 10), lastY - 8);
 
             const attachment = new AttachmentBuilder(canvas.toBuffer('image/png'), { name: `${ticker}-chart.png` });
 
