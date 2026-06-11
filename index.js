@@ -37,6 +37,54 @@ function getPortfolio(user) {
     try { return JSON.parse(user.portfolio); } catch { return {}; }
 }
 
+function buildPriceChart(prices, timestamps) {
+    const H = 8;
+    const minP = Math.min(...prices);
+    const maxP = Math.max(...prices);
+    const range = maxP - minP || 0.01;
+    const toRow = p => H - 1 - Math.round(((p - minP) / range) * (H - 1));
+    const dataRows = prices.map(toRow);
+    const n = prices.length;
+    const totalCols = 2 * n - 1;
+
+    const grid = Array.from({ length: H }, () => Array(totalCols).fill(' '));
+
+    for (let i = 0; i < n; i++) grid[dataRows[i]][i * 2] = '●';
+
+    for (let i = 0; i < n - 1; i++) {
+        const r1 = dataRows[i], r2 = dataRows[i + 1], cc = i * 2 + 1;
+        if (r1 === r2) {
+            grid[r1][cc] = '─';
+        } else if (r2 < r1) {
+            grid[r1][cc] = '╯';
+            for (let r = r2 + 1; r < r1; r++) grid[r][cc] = '│';
+        } else {
+            grid[r1][cc] = '╮';
+            for (let r = r1 + 1; r < r2; r++) grid[r][cc] = '│';
+        }
+    }
+
+    const labelRows = new Set([0, Math.floor(H / 4), Math.floor(H / 2), Math.floor(3 * H / 4), H - 1]);
+    const lines = grid.map((row, i) => {
+        const price = maxP - (i / (H - 1)) * range;
+        const label = labelRows.has(i) ? `$${price.toFixed(2)}`.padStart(8) : ' '.repeat(8);
+        return `${label} ┤${row.join('')}`;
+    });
+
+    lines.push(`         └${'─'.repeat(totalCols)}`);
+
+    const fmtT = ts => { const d = new Date(ts); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+    const t1 = fmtT(timestamps[0]);
+    const tm = fmtT(timestamps[Math.floor(n / 2)]);
+    const tN = fmtT(timestamps[n - 1]);
+    const mid = Math.floor(totalCols / 2);
+    const sp1 = Math.max(1, mid - t1.length);
+    const sp2 = Math.max(1, totalCols - mid - tm.length - tN.length + 1);
+    lines.push(`          ${t1}${' '.repeat(sp1)}${tm}${' '.repeat(sp2)}${tN}`);
+
+    return lines.join('\n');
+}
+
 // ─── Ready ────────────────────────────────────────────────────────────────────
 
 client.once(Events.ClientReady, async () => {
@@ -305,19 +353,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const sellOrderCount = db.prepare('SELECT COUNT(*) as cnt, SUM(shares) as total FROM sell_orders WHERE ticker = ?').get(ticker);
             const emoji = company.emoji ?? '🏢';
 
-            const history = db.prepare('SELECT price FROM price_history WHERE ticker = ? ORDER BY timestamp DESC LIMIT 20').all(ticker);
+            const history = db.prepare('SELECT price, timestamp FROM price_history WHERE ticker = ? ORDER BY timestamp DESC LIMIT 20').all(ticker);
             history.reverse();
             const prices = history.map(h => h.price);
+            const timestamps = history.map(h => h.timestamp);
             let chartDesc = '';
             if (prices.length >= 2) {
-                const min = Math.min(...prices);
-                const max = Math.max(...prices);
-                const range = max - min || 1;
-                const blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-                const sparkline = prices.map(p => blocks[Math.round(((p - min) / range) * (blocks.length - 1))]).join('');
                 const priceChange = prices[prices.length - 1] - prices[0];
                 const pct = ((priceChange / prices[0]) * 100).toFixed(2);
-                chartDesc = `\`\`\`${sparkline}\`\`\`${priceChange >= 0 ? '📈' : '📉'} ${priceChange >= 0 ? '+' : ''}${fmt(priceChange)} (${pct}%) over last ${prices.length} trades`;
+                chartDesc = `\`\`\`\n${buildPriceChart(prices, timestamps)}\n\`\`\`${priceChange >= 0 ? '📈' : '📉'} ${priceChange >= 0 ? '+' : ''}${fmt(priceChange)} (${pct}%) over last ${prices.length} trades`;
             }
 
             return interaction.reply({
@@ -366,35 +410,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             const history = db.prepare('SELECT price, timestamp FROM price_history WHERE ticker = ? ORDER BY timestamp DESC LIMIT 20').all(ticker);
 
-            if (history.length < 2) {
+            if (history.length < 2)
                 return interaction.reply({ content: `Not enough price history for **${ticker}** yet. Buy or sell some shares first!`, ephemeral: true });
-            }
 
             history.reverse();
             const prices = history.map(h => h.price);
-            const min = Math.min(...prices);
-            const max = Math.max(...prices);
-            const range = max - min || 1;
-
-            const blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-            const sparkline = prices.map(p => {
-                const idx = Math.round(((p - min) / range) * (blocks.length - 1));
-                return blocks[idx];
-            }).join('');
+            const timestamps = history.map(h => h.timestamp);
 
             const priceChange = prices[prices.length - 1] - prices[0];
             const pct = ((priceChange / prices[0]) * 100).toFixed(2);
             const trend = priceChange >= 0 ? '📈' : '📉';
+            const emoji = company.emoji ?? '🏢';
 
             return interaction.reply({
                 embeds: [{
-                    title: `${trend} ${company.company_name} (${ticker}) Price Chart`,
-                    description: `\`\`\`${sparkline}\`\`\``,
+                    title: `${emoji} ${company.company_name} (${ticker}) — Price Chart`,
+                    description: `\`\`\`\n${buildPriceChart(prices, timestamps)}\n\`\`\``,
                     fields: [
-                        { name: 'Low', value: `${fmt(min)} tokens`, inline: true },
-                        { name: 'High', value: `${fmt(max)} tokens`, inline: true },
+                        { name: 'Open', value: `${fmt(prices[0])} tokens`, inline: true },
                         { name: 'Current', value: `${fmt(company.current_price)} tokens`, inline: true },
                         { name: 'Change', value: `${priceChange >= 0 ? '+' : ''}${fmt(priceChange)} (${pct}%)`, inline: true },
+                        { name: 'Low', value: `${fmt(Math.min(...prices))} tokens`, inline: true },
+                        { name: 'High', value: `${fmt(Math.max(...prices))} tokens`, inline: true },
                         { name: 'Data Points', value: `${prices.length} trades`, inline: true },
                     ],
                     color: priceChange >= 0 ? 0x57F287 : 0xED4245,
