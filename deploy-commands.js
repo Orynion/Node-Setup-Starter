@@ -65,6 +65,22 @@ const commands = [
         .addStringOption(o => o.setName('emoji').setDescription('Company emoji (e.g. 🚀)').setRequired(false)),
 
     new SlashCommandBuilder()
+        .setName('admin-removecompany')
+        .setDescription('Admin: Remove a company (test use only)')
+        .addStringOption(o => o.setName('ticker').setDescription('Company ticker symbol').setRequired(true))
+        .addStringOption(o => o.setName('confirm').setDescription('Confirm removal (default: yes)').setRequired(false)
+            .addChoices({ name: 'yes', value: 'yes' }, { name: 'no', value: 'no' })),
+
+    new SlashCommandBuilder()
+        .setName('admin-editcompany')
+        .setDescription('Admin: Edit an existing company')
+        .addStringOption(o => o.setName('ticker').setDescription('Company ticker symbol').setRequired(true))
+        .addStringOption(o => o.setName('name').setDescription('New company name').setRequired(false))
+        .addUserOption(o => o.setName('owner').setDescription('New owner').setRequired(false))
+        .addNumberOption(o => o.setName('price').setDescription('New current price').setRequired(false).setMinValue(0.01))
+        .addStringOption(o => o.setName('emoji').setDescription('New emoji').setRequired(false)),
+
+    new SlashCommandBuilder()
         .setName('admin-settle')
         .setDescription('Admin: Show weekly payout invoice and reset pending cashout')
         .addStringOption(o => o.setName('ticker').setDescription('Company ticker symbol').setRequired(true)),

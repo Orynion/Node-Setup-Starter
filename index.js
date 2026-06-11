@@ -303,10 +303,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             const marketCap = company.current_price * company.shares_in_circulation;
             const sellOrderCount = db.prepare('SELECT COUNT(*) as cnt, SUM(shares) as total FROM sell_orders WHERE ticker = ?').get(ticker);
+            const emoji = company.emoji ?? '🏢';
+
+            const history = db.prepare('SELECT price FROM price_history WHERE ticker = ? ORDER BY timestamp DESC LIMIT 20').all(ticker);
+            history.reverse();
+            const prices = history.map(h => h.price);
+            let chartDesc = '';
+            if (prices.length >= 2) {
+                const min = Math.min(...prices);
+                const max = Math.max(...prices);
+                const range = max - min || 1;
+                const blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+                const sparkline = prices.map(p => blocks[Math.round(((p - min) / range) * (blocks.length - 1))]).join('');
+                const priceChange = prices[prices.length - 1] - prices[0];
+                const pct = ((priceChange / prices[0]) * 100).toFixed(2);
+                chartDesc = `\`\`\`${sparkline}\`\`\`${priceChange >= 0 ? '📈' : '📉'} ${priceChange >= 0 ? '+' : ''}${fmt(priceChange)} (${pct}%) over last ${prices.length} trades`;
+            }
 
             return interaction.reply({
                 embeds: [{
-                    title: `📊 ${company.company_name} (${ticker})`,
+                    title: `${emoji} ${company.company_name} (${ticker})`,
+                    description: chartDesc || '*No price history yet.*',
                     fields: [
                         { name: 'Current Price', value: `${fmt(company.current_price)} tokens`, inline: true },
                         { name: 'IPO Price', value: `${fmt(company.ipo_share_price)} tokens`, inline: true },
@@ -381,6 +398,66 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         { name: 'Data Points', value: `${prices.length} trades`, inline: true },
                     ],
                     color: priceChange >= 0 ? 0x57F287 : 0xED4245,
+                }]
+            });
+        }
+
+        // ── /admin-removecompany ──────────────────────────────────────────────
+        if (commandName === 'admin-removecompany') {
+            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+
+            const ticker = interaction.options.getString('ticker').toUpperCase();
+            const confirm = interaction.options.getString('confirm') ?? 'yes';
+
+            if (confirm === 'no')
+                return interaction.reply({ content: `❌ Removal of **${ticker}** cancelled.`, ephemeral: true });
+
+            const company = db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+
+            db.prepare('DELETE FROM companies WHERE ticker = ?').run(ticker);
+            db.prepare('DELETE FROM price_history WHERE ticker = ?').run(ticker);
+            db.prepare('DELETE FROM sell_orders WHERE ticker = ?').run(ticker);
+
+            return interaction.reply({
+                embeds: [{
+                    title: '🗑️ Company Removed',
+                    description: `**${company.company_name} (${ticker})** has been deleted along with its price history and open sell orders.`,
+                    color: 0xED4245,
+                }]
+            });
+        }
+
+        // ── /admin-editcompany ────────────────────────────────────────────────
+        if (commandName === 'admin-editcompany') {
+            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+
+            const ticker = interaction.options.getString('ticker').toUpperCase();
+            const company = db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+
+            const newName  = interaction.options.getString('name')   ?? company.company_name;
+            const newOwner = interaction.options.getUser('owner');
+            const newPrice = interaction.options.getNumber('price')  ?? company.current_price;
+            const newEmoji = interaction.options.getString('emoji')  ?? company.emoji ?? '🏢';
+            const ownerId  = newOwner ? newOwner.id : company.owner_id;
+
+            db.prepare(`UPDATE companies SET company_name = ?, owner_id = ?, current_price = ?, emoji = ? WHERE ticker = ?`)
+                .run(newName, ownerId, newPrice, newEmoji, ticker);
+
+            if (newPrice !== company.current_price) recordPrice(ticker, newPrice);
+
+            const changes = [];
+            if (newName !== company.company_name)   changes.push(`Name → **${newName}**`);
+            if (ownerId !== company.owner_id)        changes.push(`Owner → **${newOwner.username}**`);
+            if (newPrice !== company.current_price) changes.push(`Price → **${fmt(newPrice)}** tokens`);
+            if (newEmoji !== (company.emoji ?? '🏢')) changes.push(`Emoji → ${newEmoji}`);
+
+            return interaction.reply({
+                embeds: [{
+                    title: `${newEmoji} ${newName} (${ticker}) Updated`,
+                    description: changes.length ? changes.join('\n') : 'No changes made.',
+                    color: 0x5865F2,
                 }]
             });
         }
