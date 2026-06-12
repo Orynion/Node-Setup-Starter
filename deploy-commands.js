@@ -37,6 +37,12 @@ const commands = [
         .addIntegerOption(o => o.setName('amount').setDescription('Number of shares to list').setRequired(true).setMinValue(1)),
 
     new SlashCommandBuilder()
+        .setName('sell-cancel')
+        .setDescription('Cancel your active sell listings and return shares to your portfolio')
+        .addStringOption(o => o.setName('ticker').setDescription('Company ticker symbol').setRequired(true))
+        .addIntegerOption(o => o.setName('amount').setDescription('Number of shares to cancel (default: all)').setRequired(false).setMinValue(1)),
+
+    new SlashCommandBuilder()
         .setName('stock-info')
         .setDescription('View company stock information')
         .addStringOption(o => o.setName('ticker').setDescription('Company ticker symbol').setRequired(true)),

@@ -417,6 +417,66 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
         }
 
+        // ── /sell-cancel ──────────────────────────────────────────────────────
+        if (commandName === 'sell-cancel') {
+            const ticker = interaction.options.getString('ticker').toUpperCase();
+            const cancelAmount = interaction.options.getInteger('amount') ?? null;
+
+            const company = db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+
+            const orders = db.prepare(
+                'SELECT * FROM sell_orders WHERE seller_id = ? AND ticker = ? ORDER BY timestamp ASC'
+            ).all(interaction.user.id, ticker);
+
+            if (orders.length === 0)
+                return interaction.reply({ content: `You have no active sell listings for **${ticker}**.`, ephemeral: true });
+
+            const totalListed = orders.reduce((s, o) => s + o.shares, 0);
+            const toCancel = cancelAmount !== null ? Math.min(cancelAmount, totalListed) : totalListed;
+
+            if (toCancel <= 0)
+                return interaction.reply({ content: `Nothing to cancel.`, ephemeral: true });
+
+            // Remove orders oldest-first up to toCancel shares
+            let remaining = toCancel;
+            for (const order of orders) {
+                if (remaining <= 0) break;
+                if (order.shares <= remaining) {
+                    db.prepare('DELETE FROM sell_orders WHERE id = ?').run(order.id);
+                    remaining -= order.shares;
+                } else {
+                    db.prepare('UPDATE sell_orders SET shares = shares - ? WHERE id = ?').run(remaining, order.id);
+                    remaining = 0;
+                }
+            }
+
+            // Return shares to portfolio
+            const user = getOrCreateUser(interaction.user.id);
+            const portfolio = getPortfolio(user);
+            portfolio[ticker] = (portfolio[ticker] || 0) + toCancel;
+            db.prepare('UPDATE users SET portfolio = ? WHERE discord_id = ?').run(JSON.stringify(portfolio), interaction.user.id);
+
+            // Price goes back up (reverse of listing)
+            const newPrice = adjustPrice(company.current_price, toCancel, 'up');
+            db.prepare('UPDATE companies SET current_price = ? WHERE ticker = ?').run(newPrice, ticker);
+            recordPrice(ticker, newPrice);
+
+            const stillListed = totalListed - toCancel;
+            return interaction.reply({
+                embeds: [{
+                    title: `✅ Cancelled ${toCancel} sell listing${toCancel !== 1 ? 's' : ''} for ${ticker}`,
+                    fields: [
+                        { name: 'Shares Returned', value: `${toCancel}`, inline: true },
+                        { name: 'Still Listed', value: `${stillListed}`, inline: true },
+                        { name: 'New Market Price', value: `${fmt(newPrice)} tokens`, inline: true },
+                    ],
+                    color: 0x57F287,
+                }],
+                ephemeral: true,
+            });
+        }
+
         // ── /stock-info ───────────────────────────────────────────────────────
         if (commandName === 'stock-info') {
             const ticker = interaction.options.getString('ticker').toUpperCase();
