@@ -1,4 +1,4 @@
-const { REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 require('dotenv').config();
 
 const commands = [
@@ -7,22 +7,18 @@ const commands = [
         .setDescription('Shows your wallet tokens and stock portfolio'),
 
     new SlashCommandBuilder()
-        .setName('pay')
-        .setDescription('Transfer tokens to another user')
-        .addUserOption(o => o.setName('user').setDescription('User to pay').setRequired(true))
-        .addNumberOption(o => o.setName('amount').setDescription('Amount to transfer').setRequired(true).setMinValue(0.01)),
-
-    new SlashCommandBuilder()
         .setName('admin-add-money')
         .setDescription('Admin: Add tokens to a user')
         .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
-        .addNumberOption(o => o.setName('amount').setDescription('Amount to add').setRequired(true).setMinValue(0.01)),
+        .addNumberOption(o => o.setName('amount').setDescription('Amount to add').setRequired(true).setMinValue(0.01))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
         .setName('admin-remove-money')
         .setDescription('Admin: Remove tokens from a user')
         .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
-        .addNumberOption(o => o.setName('amount').setDescription('Amount to remove').setRequired(true).setMinValue(0.01)),
+        .addNumberOption(o => o.setName('amount').setDescription('Amount to remove').setRequired(true).setMinValue(0.01))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
         .setName('leaderboard')
@@ -62,14 +58,16 @@ const commands = [
         .addUserOption(o => o.setName('owner').setDescription('Company owner').setRequired(true))
         .addNumberOption(o => o.setName('price').setDescription('IPO share price').setRequired(true).setMinValue(0.01))
         .addIntegerOption(o => o.setName('supply').setDescription('Total share supply').setRequired(true).setMinValue(1))
-        .addStringOption(o => o.setName('emoji').setDescription('Company emoji (e.g. 🚀)').setRequired(false)),
+        .addStringOption(o => o.setName('emoji').setDescription('Company emoji (e.g. 🚀)').setRequired(false))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
         .setName('admin-removecompany')
         .setDescription('Admin: Remove a company (test use only)')
         .addStringOption(o => o.setName('ticker').setDescription('Company ticker symbol').setRequired(true))
         .addStringOption(o => o.setName('confirm').setDescription('Confirm removal (default: yes)').setRequired(false)
-            .addChoices({ name: 'yes', value: 'yes' }, { name: 'no', value: 'no' })),
+            .addChoices({ name: 'yes', value: 'yes' }, { name: 'no', value: 'no' }))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
         .setName('admin-editcompany')
@@ -78,12 +76,8 @@ const commands = [
         .addStringOption(o => o.setName('name').setDescription('New company name').setRequired(false))
         .addUserOption(o => o.setName('owner').setDescription('New owner').setRequired(false))
         .addNumberOption(o => o.setName('price').setDescription('New current price').setRequired(false).setMinValue(0.01))
-        .addStringOption(o => o.setName('emoji').setDescription('New emoji').setRequired(false)),
-
-    new SlashCommandBuilder()
-        .setName('admin-settle')
-        .setDescription('Admin: Show weekly payout invoice and reset pending cashout')
-        .addStringOption(o => o.setName('ticker').setDescription('Company ticker symbol').setRequired(true)),
+        .addStringOption(o => o.setName('emoji').setDescription('New emoji').setRequired(false))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
         .setName('earnings')

@@ -222,30 +222,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
         }
 
-        // ── /pay ──────────────────────────────────────────────────────────────
-        if (commandName === 'pay') {
-            const target = interaction.options.getUser('user');
-            const amount = interaction.options.getNumber('amount');
-
-            if (target.id === interaction.user.id) return interaction.reply({ content: 'You cannot pay yourself.', ephemeral: true });
-            if (target.bot) return interaction.reply({ content: 'You cannot pay a bot.', ephemeral: true });
-
-            const sender = getOrCreateUser(interaction.user.id);
-            if (sender.wallet_tokens < amount) return interaction.reply({ content: `Insufficient tokens. You have **${fmt(sender.wallet_tokens)}**.`, ephemeral: true });
-
-            getOrCreateUser(target.id);
-            db.prepare('UPDATE users SET wallet_tokens = wallet_tokens - ? WHERE discord_id = ?').run(amount, interaction.user.id);
-            db.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?').run(amount, target.id);
-
-            return interaction.reply({
-                embeds: [{
-                    title: '💸 Transfer Complete',
-                    description: `**${interaction.user.username}** sent **${fmt(amount)} tokens** to **${target.username}**.`,
-                    color: 0x57F287,
-                }]
-            });
-        }
-
         // ── /admin-add-money ──────────────────────────────────────────────────
         if (commandName === 'admin-add-money') {
             if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
@@ -636,31 +612,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         { name: 'Owner', value: owner.username, inline: true },
                     ],
                     color: 0x57F287,
-                }]
-            });
-        }
-
-        // ── /admin-settle ─────────────────────────────────────────────────────
-        if (commandName === 'admin-settle') {
-            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
-
-            const ticker = interaction.options.getString('ticker').toUpperCase();
-            const company = db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
-
-            const payout = company.pending_cashout_tokens;
-            db.prepare('UPDATE companies SET pending_cashout_tokens = 0 WHERE ticker = ?').run(ticker);
-
-            return interaction.reply({
-                embeds: [{
-                    title: `🧾 Weekly Settlement — ${ticker}`,
-                    fields: [
-                        { name: 'Company', value: company.company_name, inline: true },
-                        { name: 'Weekly Earnings', value: `${fmt(payout)} tokens`, inline: true },
-                        { name: 'All-Time Earnings', value: `${fmt(company.all_time_earnings)} tokens`, inline: true },
-                        { name: 'Status', value: 'Pending cashout reset to 0 ✅', inline: false },
-                    ],
-                    color: 0xFEE75C,
                 }]
             });
         }
