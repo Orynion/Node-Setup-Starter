@@ -1,0 +1,12 @@
+services:
+  - type: worker
+    name: discord-bot
+    runtime: docker
+    plan: free
+    envVars:
+      - key: TOKEN
+        sync: false
+      - key: CLIENT_ID
+        sync: false
+      - key: GUILD_ID
+        sync: false
