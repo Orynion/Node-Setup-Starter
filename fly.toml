@@ -1,0 +1,13 @@
+app = "your-discord-bot"
+primary_region = "ord"
+
+[build]
+
+[mounts]
+  source = "bot_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
