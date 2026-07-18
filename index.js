@@ -1,8 +1,13 @@
 const { Client, GatewayIntentBits, Events, PermissionFlagsBits, AttachmentBuilder } = require('discord.js');
 const { createCanvas } = require('canvas');
+const zlib = require('zlib');
+const { promisify } = require('util');
 require('dotenv').config();
 const db = require('./database.js');
 const { registerCommands } = require('./deploy-commands.js');
+
+const deflate = promisify(zlib.deflate);
+const inflate = promisify(zlib.inflate);
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -36,6 +41,46 @@ function adjustPrice(current, shares, direction) {
 
 function getPortfolio(user) {
     try { return JSON.parse(user.portfolio); } catch { return {}; }
+}
+
+async function generateBackup() {
+    const users = db.prepare('SELECT * FROM users').all();
+    const companies = db.prepare('SELECT * FROM companies').all();
+    const priceHistory = db.prepare('SELECT * FROM price_history ORDER BY timestamp ASC').all();
+    const sellOrders = db.prepare('SELECT * FROM sell_orders').all();
+    const payload = { v: 1, ts: Date.now(), users, companies, priceHistory, sellOrders };
+    const compressed = await deflate(Buffer.from(JSON.stringify(payload)));
+    return compressed.toString('base64');
+}
+
+async function restoreBackup(code) {
+    const json = (await inflate(Buffer.from(code.trim(), 'base64'))).toString();
+    const data = JSON.parse(json);
+    if (!data.v || !data.users || !data.companies) throw new Error('Invalid backup format.');
+
+    db.transaction(() => {
+        db.prepare('DELETE FROM sell_orders').run();
+        db.prepare('DELETE FROM price_history').run();
+        db.prepare('DELETE FROM companies').run();
+        db.prepare('DELETE FROM users').run();
+
+        for (const u of data.users)
+            db.prepare('INSERT INTO users (discord_id, wallet_tokens, portfolio) VALUES (?, ?, ?)').run(u.discord_id, u.wallet_tokens, u.portfolio);
+
+        for (const c of data.companies)
+            db.prepare(`INSERT INTO companies
+                (ticker, company_name, owner_id, ipo_share_price, current_price, total_supply, shares_in_circulation, bot_share_reserve, pending_cashout_tokens, all_time_earnings, emoji)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(c.ticker, c.company_name, c.owner_id, c.ipo_share_price, c.current_price, c.total_supply, c.shares_in_circulation, c.bot_share_reserve, c.pending_cashout_tokens, c.all_time_earnings, c.emoji ?? '🏢');
+
+        for (const h of data.priceHistory)
+            db.prepare('INSERT INTO price_history (id, ticker, price, timestamp) VALUES (?, ?, ?, ?)').run(h.id, h.ticker, h.price, h.timestamp);
+
+        for (const s of data.sellOrders)
+            db.prepare('INSERT INTO sell_orders (id, seller_id, ticker, shares, list_price, timestamp) VALUES (?, ?, ?, ?, ?, ?)').run(s.id, s.seller_id, s.ticker, s.shares, s.list_price, s.timestamp);
+    })();
+
+    return data;
 }
 
 function generateChartBuffer(prices, timestamps, companyName) {
@@ -189,6 +234,35 @@ client.once(Events.ClientReady, async () => {
     console.log('Bot is online!');
     console.log('Database ready!');
     await registerCommands();
+
+    const backupChannelId = process.env.BACKUP_CHANNEL_ID;
+    if (backupChannelId) {
+        try {
+            const channel = await client.channels.fetch(backupChannelId);
+            if (channel) {
+                const code = await generateBackup();
+                const buf = Buffer.from(code, 'utf-8');
+                const file = new AttachmentBuilder(buf, { name: `economy-backup-${Date.now()}.txt` });
+                const userCount = db.prepare('SELECT COUNT(*) as n FROM users').get().n;
+                const companyCount = db.prepare('SELECT COUNT(*) as n FROM companies').get().n;
+                await channel.send({
+                    embeds: [{
+                        title: '🔄 Auto Backup — Bot Started',
+                        description: `Snapshot taken on startup. Use \`/economy-restore\` and upload this file to restore.`,
+                        fields: [
+                            { name: 'Users', value: `${userCount}`, inline: true },
+                            { name: 'Companies', value: `${companyCount}`, inline: true },
+                            { name: 'Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false },
+                        ],
+                        color: 0x5865F2,
+                    }],
+                    files: [file],
+                });
+            }
+        } catch (err) {
+            console.error('Auto-backup failed:', err.message);
+        }
+    }
 });
 
 // ─── Interactions ─────────────────────────────────────────────────────────────
@@ -673,6 +747,63 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     ],
                     color: 0x57F287,
                 }]
+            });
+        }
+
+        // ── /economy-backup ───────────────────────────────────────────────────
+        if (commandName === 'economy-backup') {
+            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+
+            await interaction.deferReply({ ephemeral: true });
+            const code = await generateBackup();
+            const buf = Buffer.from(code, 'utf-8');
+            const file = new AttachmentBuilder(buf, { name: `economy-backup-${Date.now()}.txt` });
+            const userCount = db.prepare('SELECT COUNT(*) as n FROM users').get().n;
+            const companyCount = db.prepare('SELECT COUNT(*) as n FROM companies').get().n;
+            const histCount = db.prepare('SELECT COUNT(*) as n FROM price_history').get().n;
+
+            return interaction.editReply({
+                embeds: [{
+                    title: '💾 Economy Backup Generated',
+                    description: 'Upload this file to `/economy-restore` to restore the economy to this exact state.',
+                    fields: [
+                        { name: 'Users', value: `${userCount}`, inline: true },
+                        { name: 'Companies', value: `${companyCount}`, inline: true },
+                        { name: 'Price Records', value: `${histCount}`, inline: true },
+                        { name: 'Snapshot Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false },
+                    ],
+                    color: 0x5865F2,
+                }],
+                files: [file],
+            });
+        }
+
+        // ── /economy-restore ──────────────────────────────────────────────────
+        if (commandName === 'economy-restore') {
+            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+
+            const attachment = interaction.options.getAttachment('backup');
+            await interaction.deferReply({ ephemeral: true });
+
+            const res = await fetch(attachment.url);
+            if (!res.ok) return interaction.editReply({ content: '❌ Failed to download backup file.' });
+
+            const code = await res.text();
+            const data = await restoreBackup(code);
+
+            const snapshotTime = data.ts ? `<t:${Math.floor(data.ts / 1000)}:F>` : 'Unknown';
+            return interaction.editReply({
+                embeds: [{
+                    title: '✅ Economy Restored',
+                    description: 'All balances, stocks, price history, and sell orders have been restored.',
+                    fields: [
+                        { name: 'Users Restored', value: `${data.users.length}`, inline: true },
+                        { name: 'Companies Restored', value: `${data.companies.length}`, inline: true },
+                        { name: 'Price Records', value: `${data.priceHistory.length}`, inline: true },
+                        { name: 'Backup Was From', value: snapshotTime, inline: false },
+                    ],
+                    color: 0x57F287,
+                }],
             });
         }
 
