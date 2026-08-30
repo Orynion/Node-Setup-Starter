@@ -1,5 +1,4 @@
 const { Client, GatewayIntentBits, Events, PermissionFlagsBits, AttachmentBuilder } = require('discord.js');
-const { createCanvas } = require('canvas');
 const zlib = require('zlib');
 const { promisify } = require('util');
 require('dotenv').config();
@@ -83,101 +82,52 @@ async function restoreBackup(code) {
     return data;
 }
 
-function generateChartBuffer(prices, timestamps, companyName) {
-    const W = 800, H = 400;
-    const PAD = { top: 60, right: 40, bottom: 55, left: 80 };
-    const cW = W - PAD.left - PAD.right;
-    const cH = H - PAD.top - PAD.bottom;
-
-    const canvas = createCanvas(W, H);
-    const ctx = canvas.getContext('2d');
-
-    ctx.fillStyle = '#0d1117';
-    ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = '#161b22';
-    ctx.fillRect(PAD.left, PAD.top, cW, cH);
-
-    const minP = Math.min(...prices);
-    const maxP = Math.max(...prices);
-    const pRange = maxP - minP || 0.01;
-    const pad = pRange * 0.1;
-    const yMin = minP - pad, yMax = maxP + pad, yRange = yMax - yMin;
-
-    const xOf = i => PAD.left + (i / (prices.length - 1)) * cW;
-    const yOf = p => PAD.top + cH - ((p - yMin) / yRange) * cH;
-
-    // Gridlines
-    const yTicks = 5;
-    ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
-    for (let i = 0; i <= yTicks; i++) {
-        const y = PAD.top + (i / yTicks) * cH;
-        ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + cW, y); ctx.stroke();
-    }
-    ctx.setLineDash([]);
-
-    // Area fill
-    ctx.beginPath();
-    ctx.moveTo(xOf(0), yOf(prices[0]));
-    for (let i = 1; i < prices.length; i++) ctx.lineTo(xOf(i), yOf(prices[i]));
-    ctx.lineTo(xOf(prices.length - 1), PAD.top + cH);
-    ctx.lineTo(xOf(0), PAD.top + cH);
-    ctx.closePath();
-    const grad = ctx.createLinearGradient(0, PAD.top, 0, PAD.top + cH);
-    grad.addColorStop(0, 'rgba(0, 255, 136, 0.25)');
-    grad.addColorStop(1, 'rgba(0, 255, 136, 0.02)');
-    ctx.fillStyle = grad; ctx.fill();
-
-    // Price line
-    ctx.beginPath();
-    ctx.moveTo(xOf(0), yOf(prices[0]));
-    for (let i = 1; i < prices.length; i++) ctx.lineTo(xOf(i), yOf(prices[i]));
-    ctx.strokeStyle = '#00ff88'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'; ctx.stroke();
-
-    // Last dot
-    const lastX = xOf(prices.length - 1), lastY = yOf(prices[prices.length - 1]);
-    ctx.beginPath(); ctx.arc(lastX, lastY, 5, 0, Math.PI * 2);
-    ctx.fillStyle = '#00ff88'; ctx.fill();
-    ctx.strokeStyle = '#0d1117'; ctx.lineWidth = 2; ctx.stroke();
-
-    // Y axis labels
-    ctx.fillStyle = '#8b949e'; ctx.font = '12px sans-serif'; ctx.textAlign = 'right';
-    for (let i = 0; i <= yTicks; i++) {
-        const p = yMax - (i / yTicks) * yRange;
-        ctx.fillText(`$${fmt(p)}`, PAD.left - 8, PAD.top + (i / yTicks) * cH + 4);
-    }
-
-    // X axis labels
-    ctx.textAlign = 'center';
-    const xLabelCount = Math.min(5, prices.length);
-    for (let i = 0; i < xLabelCount; i++) {
-        const idx = Math.round((i / (xLabelCount - 1)) * (prices.length - 1));
-        const d = new Date(timestamps[idx]);
-        const label = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-        ctx.fillStyle = '#8b949e'; ctx.font = '12px sans-serif';
-        ctx.fillText(label, xOf(idx), PAD.top + cH + 20);
-    }
-
-    // Border
-    ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
-    ctx.strokeRect(PAD.left, PAD.top, cW, cH);
-
-    // Title
-    ctx.fillStyle = '#e6edf3'; ctx.font = 'bold 20px sans-serif'; ctx.textAlign = 'left';
-    ctx.fillText(companyName, PAD.left, 38);
-
-    // Change badge
+function generateChartUrl(prices, timestamps, companyName) {
+    const labels = timestamps.map(timestamp => {
+        const date = new Date(timestamp);
+        return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    });
     const priceChange = prices[prices.length - 1] - prices[0];
-    const pct = ((priceChange / prices[0]) * 100).toFixed(2);
-    ctx.fillStyle = priceChange >= 0 ? '#00ff88' : '#ff4444';
-    ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'right';
-    ctx.fillText(`${priceChange >= 0 ? '▲' : '▼'} ${fmt(Math.abs(priceChange))}  (${pct}%)`, W - PAD.right, 38);
+    const lineColor = priceChange >= 0 ? '#00ff88' : '#ff4444';
+    const chartConfig = {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [{
+                label: companyName,
+                data: prices,
+                borderColor: lineColor,
+                backgroundColor: priceChange >= 0 ? 'rgba(0, 255, 136, 0.18)' : 'rgba(255, 68, 68, 0.18)',
+                fill: true,
+                tension: 0.25,
+                pointRadius: 2,
+                pointBackgroundColor: lineColor,
+            }],
+        },
+        options: {
+            plugins: {
+                legend: { labels: { color: '#e6edf3' } },
+                title: {
+                    display: true,
+                    text: companyName,
+                    color: '#e6edf3',
+                    font: { size: 20 },
+                },
+            },
+            scales: {
+                x: {
+                    ticks: { color: '#8b949e', maxTicksLimit: 6 },
+                    grid: { color: '#21262d' },
+                },
+                y: {
+                    ticks: { color: '#8b949e' },
+                    grid: { color: '#21262d' },
+                },
+            },
+        },
+    };
 
-    // Current price at dot
-    ctx.fillStyle = '#00ff88'; ctx.font = 'bold 11px sans-serif';
-    ctx.textAlign = lastX > W - 100 ? 'right' : 'left';
-    ctx.fillText(`$${fmt(prices[prices.length - 1])}`, lastX + (lastX > W - 100 ? -10 : 10), lastY - 8);
-
-    return canvas.toBuffer('image/png');
+    return `https://quickchart.io/chart?width=800&height=400&backgroundColor=%230d1117&c=${encodeURIComponent(JSON.stringify(chartConfig))}`;
 }
 
 function buildPriceChart(prices, timestamps) {
@@ -586,11 +536,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
 
             await interaction.deferReply();
-            const buf = generateChartBuffer(prices, timestamps, company.company_name);
-            const attachment = new AttachmentBuilder(buf, { name: `${ticker}-info.png` });
-            embedData.image = { url: `attachment://${ticker}-info.png` };
+            embedData.image = { url: generateChartUrl(prices, timestamps, company.company_name) };
 
-            return interaction.editReply({ embeds: [embedData], files: [attachment] });
+            return interaction.editReply({ embeds: [embedData] });
         }
 
         // ── /stock-list ───────────────────────────────────────────────────────
@@ -633,8 +581,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const priceChange = prices[prices.length - 1] - prices[0];
             const pct = ((priceChange / prices[0]) * 100).toFixed(2);
             const emoji = company.emoji ?? '🏢';
-            const buf = generateChartBuffer(prices, timestamps, company.company_name);
-            const attachment = new AttachmentBuilder(buf, { name: `${ticker}-chart.png` });
+            const chartUrl = generateChartUrl(prices, timestamps, company.company_name);
 
             return interaction.editReply({
                 embeds: [{
@@ -647,10 +594,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         { name: 'High', value: `${fmt(Math.max(...prices))} tokens`, inline: true },
                         { name: 'Data Points', value: `${prices.length} trades`, inline: true },
                     ],
-                    image: { url: `attachment://${ticker}-chart.png` },
+                    image: { url: chartUrl },
                     color: priceChange >= 0 ? 0x57F287 : 0xED4245,
                 }],
-                files: [attachment],
             });
         }
 
