@@ -12,10 +12,10 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function getOrCreateUser(userId) {
-    let user = db.prepare('SELECT * FROM users WHERE discord_id = ?').get(userId);
+async function getOrCreateUser(userId) {
+    let user = await db.prepare('SELECT * FROM users WHERE discord_id = ?').get(userId);
     if (!user) {
-        db.prepare('INSERT INTO users (discord_id, wallet_tokens, portfolio) VALUES (?, 0, ?)').run(userId, '{}');
+        await db.prepare('INSERT INTO users (discord_id, wallet_tokens, portfolio) VALUES (?, 0, ?)').run(userId, '{}');
         user = { discord_id: userId, wallet_tokens: 0, portfolio: '{}' };
     }
     return user;
@@ -29,8 +29,8 @@ function fmt(n) {
     return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function recordPrice(ticker, price) {
-    db.prepare('INSERT INTO price_history (ticker, price, timestamp) VALUES (?, ?, ?)').run(ticker, price, Date.now());
+async function recordPrice(ticker, price) {
+    await db.prepare('INSERT INTO price_history (ticker, price, timestamp) VALUES (?, ?, ?)').run(ticker, price, Date.now());
 }
 
 function adjustPrice(current, shares, direction) {
@@ -43,10 +43,10 @@ function getPortfolio(user) {
 }
 
 async function generateBackup() {
-    const users = db.prepare('SELECT * FROM users').all();
-    const companies = db.prepare('SELECT * FROM companies').all();
-    const priceHistory = db.prepare('SELECT * FROM price_history ORDER BY timestamp ASC').all();
-    const sellOrders = db.prepare('SELECT * FROM sell_orders').all();
+    const users = await db.prepare('SELECT * FROM users').all();
+    const companies = await db.prepare('SELECT * FROM companies').all();
+    const priceHistory = await db.prepare('SELECT * FROM price_history ORDER BY timestamp ASC').all();
+    const sellOrders = await db.prepare('SELECT * FROM sell_orders').all();
     const payload = { v: 1, ts: Date.now(), users, companies, priceHistory, sellOrders };
     const compressed = await deflate(Buffer.from(JSON.stringify(payload)));
     return compressed.toString('base64');
@@ -57,27 +57,27 @@ async function restoreBackup(code) {
     const data = JSON.parse(json);
     if (!data.v || !data.users || !data.companies) throw new Error('Invalid backup format.');
 
-    db.transaction(() => {
-        db.prepare('DELETE FROM sell_orders').run();
-        db.prepare('DELETE FROM price_history').run();
-        db.prepare('DELETE FROM companies').run();
-        db.prepare('DELETE FROM users').run();
+    await db.transaction(async tx => {
+        await tx.prepare('DELETE FROM sell_orders').run();
+        await tx.prepare('DELETE FROM price_history').run();
+        await tx.prepare('DELETE FROM companies').run();
+        await tx.prepare('DELETE FROM users').run();
 
         for (const u of data.users)
-            db.prepare('INSERT INTO users (discord_id, wallet_tokens, portfolio) VALUES (?, ?, ?)').run(u.discord_id, u.wallet_tokens, u.portfolio);
+            await tx.prepare('INSERT INTO users (discord_id, wallet_tokens, portfolio) VALUES (?, ?, ?)').run(u.discord_id, u.wallet_tokens, u.portfolio);
 
         for (const c of data.companies)
-            db.prepare(`INSERT INTO companies
+            await tx.prepare(`INSERT INTO companies
                 (ticker, company_name, owner_id, ipo_share_price, current_price, total_supply, shares_in_circulation, bot_share_reserve, pending_cashout_tokens, all_time_earnings, emoji)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(c.ticker, c.company_name, c.owner_id, c.ipo_share_price, c.current_price, c.total_supply, c.shares_in_circulation, c.bot_share_reserve, c.pending_cashout_tokens, c.all_time_earnings, c.emoji ?? '🏢');
 
         for (const h of data.priceHistory)
-            db.prepare('INSERT INTO price_history (id, ticker, price, timestamp) VALUES (?, ?, ?, ?)').run(h.id, h.ticker, h.price, h.timestamp);
+            await tx.prepare('INSERT INTO price_history (id, ticker, price, timestamp) VALUES (?, ?, ?, ?)').run(h.id, h.ticker, h.price, h.timestamp);
 
         for (const s of data.sellOrders)
-            db.prepare('INSERT INTO sell_orders (id, seller_id, ticker, shares, list_price, timestamp) VALUES (?, ?, ?, ?, ?, ?)').run(s.id, s.seller_id, s.ticker, s.shares, s.list_price, s.timestamp);
-    })();
+            await tx.prepare('INSERT INTO sell_orders (id, seller_id, ticker, shares, list_price, timestamp) VALUES (?, ?, ?, ?, ?, ?)').run(s.id, s.seller_id, s.ticker, s.shares, s.list_price, s.timestamp);
+    });
 
     return data;
 }
@@ -181,6 +181,7 @@ function buildPriceChart(prices, timestamps) {
 // ─── Ready ────────────────────────────────────────────────────────────────────
 
 client.once(Events.ClientReady, async () => {
+    await db.ready;
     console.log('Bot is online!');
     console.log('Database ready!');
     await registerCommands();
@@ -193,8 +194,8 @@ client.once(Events.ClientReady, async () => {
                 const code = await generateBackup();
                 const buf = Buffer.from(code, 'utf-8');
                 const file = new AttachmentBuilder(buf, { name: `economy-backup-${Date.now()}.txt` });
-                const userCount = db.prepare('SELECT COUNT(*) as n FROM users').get().n;
-                const companyCount = db.prepare('SELECT COUNT(*) as n FROM companies').get().n;
+                const userCount = (await db.prepare('SELECT COUNT(*) as n FROM users').get()).n;
+                const companyCount = (await db.prepare('SELECT COUNT(*) as n FROM companies').get()).n;
                 await channel.send({
                     embeds: [{
                         title: '🔄 Auto Backup — Bot Started',
@@ -226,7 +227,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /balance ──────────────────────────────────────────────────────────
         if (commandName === 'balance') {
-            const user = getOrCreateUser(interaction.user.id);
+            const user = await getOrCreateUser(interaction.user.id);
             const portfolio = getPortfolio(user);
             const entries = Object.entries(portfolio);
 
@@ -252,8 +253,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             const target = interaction.options.getUser('user');
             const amount = interaction.options.getNumber('amount');
-            getOrCreateUser(target.id);
-            db.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?').run(amount, target.id);
+            await getOrCreateUser(target.id);
+            await db.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?').run(amount, target.id);
 
             return interaction.reply({
                 embeds: [{
@@ -270,8 +271,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             const target = interaction.options.getUser('user');
             const amount = interaction.options.getNumber('amount');
-            getOrCreateUser(target.id);
-            db.prepare('UPDATE users SET wallet_tokens = MAX(0, wallet_tokens - ?) WHERE discord_id = ?').run(amount, target.id);
+            await getOrCreateUser(target.id);
+            await db.prepare('UPDATE users SET wallet_tokens = MAX(0, wallet_tokens - ?) WHERE discord_id = ?').run(amount, target.id);
 
             return interaction.reply({
                 embeds: [{
@@ -284,7 +285,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /leaderboard ──────────────────────────────────────────────────────
         if (commandName === 'leaderboard') {
-            const top = db.prepare('SELECT discord_id, wallet_tokens FROM users ORDER BY wallet_tokens DESC LIMIT 10').all();
+            const top = await db.prepare('SELECT discord_id, wallet_tokens FROM users ORDER BY wallet_tokens DESC LIMIT 10').all();
 
             if (top.length === 0) return interaction.reply({ content: 'No users found.', ephemeral: true });
 
@@ -315,13 +316,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const amount = interaction.options.getInteger('amount');
 
-            const company = db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
             if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
-            const buyer = getOrCreateUser(interaction.user.id);
+            const buyer = await getOrCreateUser(interaction.user.id);
             const portfolio = getPortfolio(buyer);
 
-            const sellOrders = db.prepare(
+            const sellOrders = await db.prepare(
                 'SELECT * FROM sell_orders WHERE ticker = ? AND seller_id != ? ORDER BY list_price ASC, timestamp ASC'
             ).all(ticker, interaction.user.id);
 
@@ -350,12 +351,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             // Process sell orders
             for (const { order, fill } of ordersToFill) {
-                getOrCreateUser(order.seller_id);
-                db.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?').run(fill * order.list_price, order.seller_id);
+                await getOrCreateUser(order.seller_id);
+                await db.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?').run(fill * order.list_price, order.seller_id);
                 if (fill === order.shares) {
-                    db.prepare('DELETE FROM sell_orders WHERE id = ?').run(order.id);
+                    await db.prepare('DELETE FROM sell_orders WHERE id = ?').run(order.id);
                 } else {
-                    db.prepare('UPDATE sell_orders SET shares = shares - ? WHERE id = ?').run(fill, order.id);
+                    await db.prepare('UPDATE sell_orders SET shares = shares - ? WHERE id = ?').run(fill, order.id);
                 }
             }
 
@@ -364,7 +365,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (sharesFromBot > 0) {
                 const ownerEarnings = sharesFromBot * company.current_price;
                 newPrice = adjustPrice(company.current_price, sharesFromBot, 'up');
-                db.prepare(`UPDATE companies SET
+                await db.prepare(`UPDATE companies SET
                     bot_share_reserve = bot_share_reserve - ?,
                     shares_in_circulation = shares_in_circulation + ?,
                     current_price = ?,
@@ -372,14 +373,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     all_time_earnings = all_time_earnings + ?
                     WHERE ticker = ?`
                 ).run(sharesFromBot, sharesFromBot, newPrice, ownerEarnings, ownerEarnings, ticker);
-                getOrCreateUser(company.owner_id);
-                db.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?').run(ownerEarnings, company.owner_id);
-                recordPrice(ticker, newPrice);
+                await getOrCreateUser(company.owner_id);
+                await db.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?').run(ownerEarnings, company.owner_id);
+                await recordPrice(ticker, newPrice);
             }
 
             // Deduct buyer tokens and update portfolio
             portfolio[ticker] = (portfolio[ticker] || 0) + amount;
-            db.prepare('UPDATE users SET wallet_tokens = wallet_tokens - ?, portfolio = ? WHERE discord_id = ?')
+            await db.prepare('UPDATE users SET wallet_tokens = wallet_tokens - ?, portfolio = ? WHERE discord_id = ?')
                 .run(totalCost, JSON.stringify(portfolio), interaction.user.id);
 
             const sharesFromOrders = amount - sharesFromBot;
@@ -402,10 +403,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const amount = interaction.options.getInteger('amount');
 
-            const company = db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
             if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
-            const user = getOrCreateUser(interaction.user.id);
+            const user = await getOrCreateUser(interaction.user.id);
             const portfolio = getPortfolio(user);
             const owned = portfolio[ticker] || 0;
 
@@ -415,17 +416,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
             // Remove from portfolio
             portfolio[ticker] = owned - amount;
             if (portfolio[ticker] === 0) delete portfolio[ticker];
-            db.prepare('UPDATE users SET portfolio = ? WHERE discord_id = ?').run(JSON.stringify(portfolio), interaction.user.id);
+            await db.prepare('UPDATE users SET portfolio = ? WHERE discord_id = ?').run(JSON.stringify(portfolio), interaction.user.id);
 
             // Create sell order at current price
             const listPrice = company.current_price;
-            db.prepare('INSERT INTO sell_orders (seller_id, ticker, shares, list_price, timestamp) VALUES (?, ?, ?, ?, ?)')
+            await db.prepare('INSERT INTO sell_orders (seller_id, ticker, shares, list_price, timestamp) VALUES (?, ?, ?, ?, ?)')
                 .run(interaction.user.id, ticker, amount, listPrice, Date.now());
 
             // Price goes down
             const newPrice = adjustPrice(company.current_price, amount, 'down');
-            db.prepare('UPDATE companies SET current_price = ? WHERE ticker = ?').run(newPrice, ticker);
-            recordPrice(ticker, newPrice);
+            await db.prepare('UPDATE companies SET current_price = ? WHERE ticker = ?').run(newPrice, ticker);
+            await recordPrice(ticker, newPrice);
 
             return interaction.reply({
                 embeds: [{
@@ -446,10 +447,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const cancelAmount = interaction.options.getInteger('amount') ?? null;
 
-            const company = db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
             if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
-            const orders = db.prepare(
+            const orders = await db.prepare(
                 'SELECT * FROM sell_orders WHERE seller_id = ? AND ticker = ? ORDER BY timestamp ASC'
             ).all(interaction.user.id, ticker);
 
@@ -467,24 +468,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
             for (const order of orders) {
                 if (remaining <= 0) break;
                 if (order.shares <= remaining) {
-                    db.prepare('DELETE FROM sell_orders WHERE id = ?').run(order.id);
+                    await db.prepare('DELETE FROM sell_orders WHERE id = ?').run(order.id);
                     remaining -= order.shares;
                 } else {
-                    db.prepare('UPDATE sell_orders SET shares = shares - ? WHERE id = ?').run(remaining, order.id);
+                    await db.prepare('UPDATE sell_orders SET shares = shares - ? WHERE id = ?').run(remaining, order.id);
                     remaining = 0;
                 }
             }
 
             // Return shares to portfolio
-            const user = getOrCreateUser(interaction.user.id);
+            const user = await getOrCreateUser(interaction.user.id);
             const portfolio = getPortfolio(user);
             portfolio[ticker] = (portfolio[ticker] || 0) + toCancel;
-            db.prepare('UPDATE users SET portfolio = ? WHERE discord_id = ?').run(JSON.stringify(portfolio), interaction.user.id);
+            await db.prepare('UPDATE users SET portfolio = ? WHERE discord_id = ?').run(JSON.stringify(portfolio), interaction.user.id);
 
             // Price goes back up (reverse of listing)
             const newPrice = adjustPrice(company.current_price, toCancel, 'up');
-            db.prepare('UPDATE companies SET current_price = ? WHERE ticker = ?').run(newPrice, ticker);
-            recordPrice(ticker, newPrice);
+            await db.prepare('UPDATE companies SET current_price = ? WHERE ticker = ?').run(newPrice, ticker);
+            await recordPrice(ticker, newPrice);
 
             const stillListed = totalListed - toCancel;
             return interaction.reply({
@@ -504,14 +505,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // ── /stock-info ───────────────────────────────────────────────────────
         if (commandName === 'stock-info') {
             const ticker = interaction.options.getString('ticker').toUpperCase();
-            const company = db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
             if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
             const marketCap = company.current_price * company.shares_in_circulation;
-            const sellOrderCount = db.prepare('SELECT COUNT(*) as cnt, SUM(shares) as total FROM sell_orders WHERE ticker = ?').get(ticker);
+            const sellOrderCount = await db.prepare('SELECT COUNT(*) as cnt, SUM(shares) as total FROM sell_orders WHERE ticker = ?').get(ticker);
             const emoji = company.emoji ?? '🏢';
 
-            const history = db.prepare('SELECT price, timestamp FROM price_history WHERE ticker = ? ORDER BY timestamp DESC LIMIT 60').all(ticker);
+            const history = await db.prepare('SELECT price, timestamp FROM price_history WHERE ticker = ? ORDER BY timestamp DESC LIMIT 60').all(ticker);
             history.reverse();
             const prices = history.map(h => h.price);
             const timestamps = history.map(h => h.timestamp);
@@ -543,7 +544,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /stock-list ───────────────────────────────────────────────────────
         if (commandName === 'stock-list') {
-            const companies = db.prepare('SELECT * FROM companies ORDER BY current_price DESC').all();
+            const companies = await db.prepare('SELECT * FROM companies ORDER BY current_price DESC').all();
             if (companies.length === 0) return interaction.reply({ content: 'No companies listed yet.', ephemeral: true });
 
             const lines = companies.map(c => {
@@ -564,10 +565,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // ── /chart ────────────────────────────────────────────────────────────
         if (commandName === 'chart') {
             const ticker = interaction.options.getString('ticker').toUpperCase();
-            const company = db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
             if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
-            const history = db.prepare('SELECT price, timestamp FROM price_history WHERE ticker = ? ORDER BY timestamp DESC LIMIT 60').all(ticker);
+            const history = await db.prepare('SELECT price, timestamp FROM price_history WHERE ticker = ? ORDER BY timestamp DESC LIMIT 60').all(ticker);
 
             if (history.length < 2)
                 return interaction.reply({ content: `Not enough price history for **${ticker}** yet. Buy or sell some shares first!`, ephemeral: true });
@@ -610,12 +611,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (confirm === 'no')
                 return interaction.reply({ content: `❌ Removal of **${ticker}** cancelled.`, ephemeral: true });
 
-            const company = db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
             if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
-            db.prepare('DELETE FROM companies WHERE ticker = ?').run(ticker);
-            db.prepare('DELETE FROM price_history WHERE ticker = ?').run(ticker);
-            db.prepare('DELETE FROM sell_orders WHERE ticker = ?').run(ticker);
+            await db.prepare('DELETE FROM companies WHERE ticker = ?').run(ticker);
+            await db.prepare('DELETE FROM price_history WHERE ticker = ?').run(ticker);
+            await db.prepare('DELETE FROM sell_orders WHERE ticker = ?').run(ticker);
 
             return interaction.reply({
                 embeds: [{
@@ -631,7 +632,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
 
             const ticker = interaction.options.getString('ticker').toUpperCase();
-            const company = db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
             if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
             const newName  = interaction.options.getString('name')   ?? company.company_name;
@@ -640,10 +641,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const newEmoji = interaction.options.getString('emoji')  ?? company.emoji ?? '🏢';
             const ownerId  = newOwner ? newOwner.id : company.owner_id;
 
-            db.prepare(`UPDATE companies SET company_name = ?, owner_id = ?, current_price = ?, emoji = ? WHERE ticker = ?`)
+            await db.prepare(`UPDATE companies SET company_name = ?, owner_id = ?, current_price = ?, emoji = ? WHERE ticker = ?`)
                 .run(newName, ownerId, newPrice, newEmoji, ticker);
 
-            if (newPrice !== company.current_price) recordPrice(ticker, newPrice);
+            if (newPrice !== company.current_price) await recordPrice(ticker, newPrice);
 
             const changes = [];
             if (newName !== company.company_name)   changes.push(`Name → **${newName}**`);
@@ -671,15 +672,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const supply = interaction.options.getInteger('supply');
             const emoji = interaction.options.getString('emoji') ?? '🏢';
 
-            const existing = db.prepare('SELECT ticker FROM companies WHERE ticker = ?').get(ticker);
+            const existing = await db.prepare('SELECT ticker FROM companies WHERE ticker = ?').get(ticker);
             if (existing) return interaction.reply({ content: `Company **${ticker}** already exists.`, ephemeral: true });
 
-            db.prepare(`INSERT INTO companies
+            await db.prepare(`INSERT INTO companies
                 (ticker, company_name, owner_id, ipo_share_price, current_price, total_supply, shares_in_circulation, bot_share_reserve, pending_cashout_tokens, all_time_earnings, emoji)
                 VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?)
             `).run(ticker, name, owner.id, price, price, supply, supply, emoji);
 
-            recordPrice(ticker, price);
+            await recordPrice(ticker, price);
 
             return interaction.reply({
                 embeds: [{
@@ -704,9 +705,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const code = await generateBackup();
             const buf = Buffer.from(code, 'utf-8');
             const file = new AttachmentBuilder(buf, { name: `economy-backup-${Date.now()}.txt` });
-            const userCount = db.prepare('SELECT COUNT(*) as n FROM users').get().n;
-            const companyCount = db.prepare('SELECT COUNT(*) as n FROM companies').get().n;
-            const histCount = db.prepare('SELECT COUNT(*) as n FROM price_history').get().n;
+            const userCount = (await db.prepare('SELECT COUNT(*) as n FROM users').get()).n;
+            const companyCount = (await db.prepare('SELECT COUNT(*) as n FROM companies').get()).n;
+            const histCount = (await db.prepare('SELECT COUNT(*) as n FROM price_history').get()).n;
 
             return interaction.editReply({
                 embeds: [{
@@ -755,7 +756,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /earnings ─────────────────────────────────────────────────────────
         if (commandName === 'earnings') {
-            const companies = db.prepare('SELECT * FROM companies WHERE owner_id = ?').all(interaction.user.id);
+            const companies = await db.prepare('SELECT * FROM companies WHERE owner_id = ?').all(interaction.user.id);
             if (companies.length === 0)
                 return interaction.reply({ content: 'You do not own any companies.', ephemeral: true });
 
