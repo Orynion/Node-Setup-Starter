@@ -1,12 +1,24 @@
 const { Client, GatewayIntentBits, Events, PermissionFlagsBits, AttachmentBuilder } = require('discord.js');
 const zlib = require('zlib');
 const { promisify } = require('util');
+const express = require('express');
 require('dotenv').config();
 const db = require('./database.js');
 const { registerCommands } = require('./deploy-commands.js');
 
 const deflate = promisify(zlib.deflate);
 const inflate = promisify(zlib.inflate);
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.get('/', (_req, res) => {
+    res.send('Bot is running');
+});
+
+app.listen(port, '0.0.0.0', () => {
+    console.log(`Health server listening on port ${port}`);
+});
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
