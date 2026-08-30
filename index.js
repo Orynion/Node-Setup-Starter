@@ -54,6 +54,34 @@ function getPortfolio(user) {
     try { return JSON.parse(user.portfolio); } catch { return {}; }
 }
 
+function parseEmbedColor(value) {
+    if (!value) return 0x5865F2;
+
+    const normalized = value.trim().replace(/^#/, '').replace(/^0x/i, '');
+    if (!/^[\da-f]{6}$/i.test(normalized)) {
+        throw new Error('Color must be a six-digit hex value, such as #5865F2.');
+    }
+
+    return parseInt(normalized, 16);
+}
+
+function validateImageUrl(value) {
+    if (!value) return null;
+
+    let url;
+    try {
+        url = new URL(value);
+    } catch {
+        throw new Error('Image URL must be a valid http:// or https:// URL.');
+    }
+
+    if (!['http:', 'https:'].includes(url.protocol)) {
+        throw new Error('Image URL must begin with http:// or https://.');
+    }
+
+    return url.toString();
+}
+
 async function generateBackup() {
     const users = await db.prepare('SELECT * FROM users').all();
     const companies = await db.prepare('SELECT * FROM companies').all();
@@ -764,6 +792,33 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     color: 0x57F287,
                 }],
             });
+        }
+
+        // ── /server-embed ──────────────────────────────────────────────────────
+        if (commandName === 'server-embed') {
+            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+
+            const title = interaction.options.getString('title');
+            const description = interaction.options.getString('description');
+            const colorInput = interaction.options.getString('color');
+            const imageUrlInput = interaction.options.getString('image_url');
+            const footerText = interaction.options.getString('footer');
+
+            let color;
+            let imageUrl;
+            try {
+                color = parseEmbedColor(colorInput);
+                imageUrl = validateImageUrl(imageUrlInput);
+            } catch (err) {
+                return interaction.reply({ content: err.message, ephemeral: true });
+            }
+
+            const embed = { title, color };
+            if (description) embed.description = description;
+            if (imageUrl) embed.image = { url: imageUrl };
+            if (footerText) embed.footer = { text: footerText };
+
+            return interaction.reply({ embeds: [embed] });
         }
 
         // ── /earnings ─────────────────────────────────────────────────────────
