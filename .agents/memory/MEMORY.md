@@ -1,0 +1,1 @@
+- [GitHub sync in this workspace](github-sync.md) — use the connected GitHub API when direct Git HTTPS authentication is unavailable, then reconcile local refs to the verified remote tip.
