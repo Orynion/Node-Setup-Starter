@@ -34,7 +34,10 @@ async function getOrCreateUser(userId) {
 }
 
 function isAdmin(interaction) {
-    return interaction.member.permissions.has(PermissionFlagsBits.Administrator);
+    return Boolean(
+        interaction.inGuild() &&
+        interaction.member?.permissions?.has(PermissionFlagsBits.Administrator)
+    );
 }
 
 function fmt(n) {
@@ -223,6 +226,7 @@ function buildPriceChart(prices, timestamps) {
 client.once(Events.ClientReady, async () => {
     await db.ready;
     console.log('Bot is online!');
+    console.log(`Bot is currently in ${client.guilds.cache.size} server(s).`);
     console.log('Database ready!');
     await registerCommands();
 
