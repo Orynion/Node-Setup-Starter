@@ -1,4 +1,14 @@
-const { Client, GatewayIntentBits, Events, PermissionFlagsBits, AttachmentBuilder } = require('discord.js');
+const {
+    Client,
+    GatewayIntentBits,
+    Events,
+    PermissionFlagsBits,
+    AttachmentBuilder,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    ChannelType,
+} = require('discord.js');
 const zlib = require('zlib');
 const { promisify } = require('util');
 const express = require('express');
@@ -20,7 +30,36 @@ app.listen(port, '0.0.0.0', () => {
     console.log(`Health server listening on port ${port}`);
 });
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const TICKET_PANEL_CHANNEL_ID = '1543951837235904512';
+const TICKET_CATEGORY_NAME = '「📩」Contact Us------------------';
+const OWNER_ROLE_ID = '1478001619030511747';
+const REPRESENTATIVE_ROLE_ID = '1543952151364116490';
+const TICKET_TYPES = new Map([
+    ['buy_tokens', {
+        slug: 'buy-tokens',
+        label: 'Buy Tokens',
+        description: 'Please provide the amount of tokens you want to buy and your preferred payment method.',
+    }],
+    ['register_company', {
+        slug: 'register-company',
+        label: 'Register Company',
+        description: 'Please provide the company name, ticker symbol, and owner.',
+    }],
+    ['contact_us', {
+        slug: 'contact-us',
+        label: 'Contact Us',
+        description: 'Please describe your question or general inquiry in as much detail as possible.',
+    }],
+]);
+const closingTickets = new Set();
+
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+    ],
+});
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -83,6 +122,200 @@ function validateImageUrl(value) {
     }
 
     return url.toString();
+}
+
+function hasSupportRole(interaction) {
+    return Boolean(
+        interaction.inGuild() &&
+        interaction.member?.roles?.cache?.some(role =>
+            role.id === OWNER_ROLE_ID || role.id === REPRESENTATIVE_ROLE_ID
+        )
+    );
+}
+
+function ticketTopic(ticketType, userId) {
+    return `ticket:${ticketType}:${userId}`;
+}
+
+function ticketChannelName(ticketType, username) {
+    const safeUsername = username
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 80) || 'user';
+    return `${TICKET_TYPES.get(ticketType).slug}-${safeUsername}`.slice(0, 100);
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function handleTicketButton(interaction) {
+    await interaction.deferReply({ ephemeral: true });
+
+    const [, action, ticketType] = interaction.customId.split(':');
+    if (!interaction.inGuild()) {
+        return interaction.editReply({ content: 'Tickets can only be used inside a server.' });
+    }
+
+    const guild = interaction.guild;
+
+    if (action === 'close') {
+        const channel = interaction.channel;
+        if (
+            !channel ||
+            channel.type !== ChannelType.GuildText ||
+            !channel.topic?.startsWith('ticket:')
+        ) {
+            return interaction.editReply({ content: 'This button can only be used inside a ticket channel.' });
+        }
+
+        if (!hasSupportRole(interaction)) {
+            return interaction.editReply({ content: 'Only the Owner or Representative role can close tickets.' });
+        }
+
+        if (closingTickets.has(channel.id)) {
+            return interaction.editReply({ content: 'This ticket is already being closed.' });
+        }
+
+        closingTickets.add(channel.id);
+        try {
+            const countdown = await channel.send({
+                content: '🔒 This ticket will be deleted in **5 seconds**.',
+                allowedMentions: { parse: [] },
+            });
+            await interaction.editReply({ content: 'Ticket closing countdown started.' });
+
+            for (let remaining = 4; remaining > 0; remaining--) {
+                await sleep(1000);
+                await countdown.edit({
+                    content: `🔒 This ticket will be deleted in **${remaining} second${remaining === 1 ? '' : 's'}**.`,
+                });
+            }
+            await sleep(1000);
+            await channel.delete('Ticket closed by Owner or Representative');
+        } catch (error) {
+            console.error('Failed to close ticket:', error);
+            closingTickets.delete(channel.id);
+            if (!interaction.replied) {
+                await interaction.editReply({ content: 'Unable to close this ticket.' }).catch(() => {});
+            }
+        }
+        return;
+    }
+
+    const ticket = TICKET_TYPES.get(ticketType);
+    if (!ticket) {
+        return interaction.editReply({ content: 'Unknown ticket type.' });
+    }
+
+    try {
+        const channels = await guild.channels.fetch();
+        const category = channels.find(channel =>
+            channel.type === ChannelType.GuildCategory &&
+            channel.name === TICKET_CATEGORY_NAME
+        );
+
+        if (!category) {
+            return interaction.editReply({
+                content: `The ticket category "${TICKET_CATEGORY_NAME}" could not be found.`,
+            });
+        }
+
+        const existingTicket = channels.find(channel =>
+            channel.type === ChannelType.GuildText &&
+            channel.parentId === category.id &&
+            channel.topic === ticketTopic(ticketType, interaction.user.id)
+        );
+        if (existingTicket) {
+            return interaction.editReply({
+                content: `You already have an open **${ticket.label}** ticket: ${existingTicket}.`,
+            });
+        }
+
+        const [ownerRole, representativeRole] = await Promise.all([
+            guild.roles.fetch(OWNER_ROLE_ID).catch(() => null),
+            guild.roles.fetch(REPRESENTATIVE_ROLE_ID).catch(() => null),
+        ]);
+        if (!ownerRole || !representativeRole) {
+            return interaction.editReply({
+                content: 'The configured Owner or Representative role could not be found in this server.',
+            });
+        }
+
+        const ticketChannel = await guild.channels.create({
+            name: ticketChannelName(ticketType, interaction.user.username),
+            type: ChannelType.GuildText,
+            parent: category.id,
+            topic: ticketTopic(ticketType, interaction.user.id),
+            permissionOverwrites: [
+                {
+                    id: guild.roles.everyone.id,
+                    deny: [PermissionFlagsBits.ViewChannel],
+                },
+                {
+                    id: interaction.user.id,
+                    allow: [
+                        PermissionFlagsBits.ViewChannel,
+                        PermissionFlagsBits.SendMessages,
+                        PermissionFlagsBits.ReadMessageHistory,
+                        PermissionFlagsBits.AttachFiles,
+                        PermissionFlagsBits.EmbedLinks,
+                    ],
+                },
+                {
+                    id: ownerRole.id,
+                    allow: [
+                        PermissionFlagsBits.ViewChannel,
+                        PermissionFlagsBits.SendMessages,
+                        PermissionFlagsBits.ReadMessageHistory,
+                    ],
+                },
+                {
+                    id: representativeRole.id,
+                    allow: [
+                        PermissionFlagsBits.ViewChannel,
+                        PermissionFlagsBits.SendMessages,
+                        PermissionFlagsBits.ReadMessageHistory,
+                    ],
+                },
+                {
+                    id: client.user.id,
+                    allow: [
+                        PermissionFlagsBits.ViewChannel,
+                        PermissionFlagsBits.SendMessages,
+                        PermissionFlagsBits.ReadMessageHistory,
+                        PermissionFlagsBits.ManageChannels,
+                    ],
+                },
+            ],
+        });
+
+        const closeRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('ticket:close')
+                .setLabel('Close Ticket')
+                .setStyle(ButtonStyle.Danger)
+        );
+        await ticketChannel.send({
+            content: `${interaction.user} <@&${ownerRole.id}> <@&${representativeRole.id}>`,
+            allowedMentions: {
+                users: [interaction.user.id],
+                roles: [ownerRole.id, representativeRole.id],
+            },
+            embeds: [{
+                title: `${ticket.label} Ticket`,
+                description: ticket.description,
+                color: 0x5865F2,
+            }],
+            components: [closeRow],
+        });
+
+        return interaction.editReply({ content: `Your ticket has been created: ${ticketChannel}` });
+    } catch (error) {
+        console.error('Failed to create ticket:', error);
+        return interaction.editReply({ content: 'Unable to create your ticket right now. Please try again later.' });
+    }
 }
 
 async function generateBackup() {
@@ -263,11 +496,19 @@ client.once(Events.ClientReady, async () => {
 // ─── Interactions ─────────────────────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async (interaction) => {
+    if (interaction.isButton()) {
+        if (interaction.customId.startsWith('ticket:')) {
+            await handleTicketButton(interaction);
+        }
+        return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;
 
     try {
+        await interaction.deferReply();
 
         // ── /balance ──────────────────────────────────────────────────────────
         if (commandName === 'balance') {
@@ -279,7 +520,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 ? 'No stocks owned.'
                 : entries.map(([t, s]) => `**${t}**: ${s} share${s !== 1 ? 's' : ''}`).join('\n');
 
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: `💰 ${interaction.user.username}'s Balance`,
                     fields: [
@@ -293,14 +534,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /admin-add-money ──────────────────────────────────────────────────
         if (commandName === 'admin-add-money') {
-            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
 
             const target = interaction.options.getUser('user');
             const amount = interaction.options.getNumber('amount');
             await getOrCreateUser(target.id);
             await db.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?').run(amount, target.id);
 
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: '✅ Tokens Added',
                     description: `Added **${fmt(amount)} tokens** to **${target.username}**.`,
@@ -311,14 +552,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /admin-remove-money ───────────────────────────────────────────────
         if (commandName === 'admin-remove-money') {
-            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
 
             const target = interaction.options.getUser('user');
             const amount = interaction.options.getNumber('amount');
             await getOrCreateUser(target.id);
             await db.prepare('UPDATE users SET wallet_tokens = MAX(0, wallet_tokens - ?) WHERE discord_id = ?').run(amount, target.id);
 
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: '✅ Tokens Removed',
                     description: `Removed **${fmt(amount)} tokens** from **${target.username}**.`,
@@ -331,7 +572,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (commandName === 'leaderboard') {
             const top = await db.prepare('SELECT discord_id, wallet_tokens FROM users ORDER BY wallet_tokens DESC LIMIT 10').all();
 
-            if (top.length === 0) return interaction.reply({ content: 'No users found.', ephemeral: true });
+            if (top.length === 0) return interaction.editReply({ content: 'No users found.', ephemeral: true });
 
             const medals = ['🥇', '🥈', '🥉'];
             const lines = await Promise.all(top.map(async (u, i) => {
@@ -346,7 +587,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 return `${medal} ${name} — ${fmt(u.wallet_tokens)} tokens`;
             }));
 
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: '🏆 Token Leaderboard',
                     description: lines.join('\n'),
@@ -361,7 +602,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const amount = interaction.options.getInteger('amount');
 
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
             const buyer = await getOrCreateUser(interaction.user.id);
             const portfolio = getPortfolio(buyer);
@@ -385,13 +626,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             if (remaining > 0) {
                 if (company.bot_share_reserve < remaining)
-                    return interaction.reply({ content: `Not enough shares available. Bot reserve: **${company.bot_share_reserve}**, sell orders available: **${amount - remaining}**.`, ephemeral: true });
+                    return interaction.editReply({ content: `Not enough shares available. Bot reserve: **${company.bot_share_reserve}**, sell orders available: **${amount - remaining}**.`, ephemeral: true });
                 totalCost += remaining * company.current_price;
                 sharesFromBot = remaining;
             }
 
             if (buyer.wallet_tokens < totalCost)
-                return interaction.reply({ content: `Insufficient tokens. Need **${fmt(totalCost)}**, you have **${fmt(buyer.wallet_tokens)}**.`, ephemeral: true });
+                    return interaction.editReply({ content: `Insufficient tokens. Need **${fmt(totalCost)}**, you have **${fmt(buyer.wallet_tokens)}**.`, ephemeral: true });
 
             // Process sell orders
             for (const { order, fill } of ordersToFill) {
@@ -428,7 +669,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 .run(totalCost, JSON.stringify(portfolio), interaction.user.id);
 
             const sharesFromOrders = amount - sharesFromBot;
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: `📈 Bought ${amount} shares of ${ticker}`,
                     fields: [
@@ -448,14 +689,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const amount = interaction.options.getInteger('amount');
 
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
             const user = await getOrCreateUser(interaction.user.id);
             const portfolio = getPortfolio(user);
             const owned = portfolio[ticker] || 0;
 
             if (owned < amount)
-                return interaction.reply({ content: `You only own **${owned}** shares of **${ticker}**.`, ephemeral: true });
+                return interaction.editReply({ content: `You only own **${owned}** shares of **${ticker}**.`, ephemeral: true });
 
             // Remove from portfolio
             portfolio[ticker] = owned - amount;
@@ -472,7 +713,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await db.prepare('UPDATE companies SET current_price = ? WHERE ticker = ?').run(newPrice, ticker);
             await recordPrice(ticker, newPrice);
 
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: `📉 Listed ${amount} shares of ${ticker}`,
                     fields: [
@@ -492,20 +733,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const cancelAmount = interaction.options.getInteger('amount') ?? null;
 
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
             const orders = await db.prepare(
                 'SELECT * FROM sell_orders WHERE seller_id = ? AND ticker = ? ORDER BY timestamp ASC'
             ).all(interaction.user.id, ticker);
 
             if (orders.length === 0)
-                return interaction.reply({ content: `You have no active sell listings for **${ticker}**.`, ephemeral: true });
+                return interaction.editReply({ content: `You have no active sell listings for **${ticker}**.`, ephemeral: true });
 
             const totalListed = orders.reduce((s, o) => s + o.shares, 0);
             const toCancel = cancelAmount !== null ? Math.min(cancelAmount, totalListed) : totalListed;
 
             if (toCancel <= 0)
-                return interaction.reply({ content: `Nothing to cancel.`, ephemeral: true });
+                return interaction.editReply({ content: `Nothing to cancel.`, ephemeral: true });
 
             // Remove orders oldest-first up to toCancel shares
             let remaining = toCancel;
@@ -532,7 +773,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await recordPrice(ticker, newPrice);
 
             const stillListed = totalListed - toCancel;
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: `✅ Cancelled ${toCancel} sell listing${toCancel !== 1 ? 's' : ''} for ${ticker}`,
                     fields: [
@@ -550,7 +791,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (commandName === 'stock-info') {
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
             const marketCap = company.current_price * company.shares_in_circulation;
             const sellOrderCount = await db.prepare('SELECT COUNT(*) as cnt, SUM(shares) as total FROM sell_orders WHERE ticker = ?').get(ticker);
@@ -577,10 +818,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
             };
 
             if (!hasChart) {
-                return interaction.reply({ embeds: [embedData] });
+                return interaction.editReply({ embeds: [embedData] });
             }
 
-            await interaction.deferReply();
             embedData.image = { url: generateChartUrl(prices, timestamps, company.company_name) };
 
             return interaction.editReply({ embeds: [embedData] });
@@ -589,7 +829,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // ── /stock-list ───────────────────────────────────────────────────────
         if (commandName === 'stock-list') {
             const companies = await db.prepare('SELECT * FROM companies ORDER BY current_price DESC').all();
-            if (companies.length === 0) return interaction.reply({ content: 'No companies listed yet.', ephemeral: true });
+            if (companies.length === 0) return interaction.editReply({ content: 'No companies listed yet.', ephemeral: true });
 
             const lines = companies.map(c => {
                 const change = ((c.current_price - c.ipo_share_price) / c.ipo_share_price * 100).toFixed(1);
@@ -597,7 +837,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 return `${arrow} **${c.ticker}** — ${c.company_name}\n  Price: **${fmt(c.current_price)}** tokens (${change}% from IPO) | Reserve: ${c.bot_share_reserve}`;
             });
 
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: '🏢 Listed Companies',
                     description: lines.join('\n\n'),
@@ -610,14 +850,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (commandName === 'chart') {
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
             const history = await db.prepare('SELECT price, timestamp FROM price_history WHERE ticker = ? ORDER BY timestamp DESC LIMIT 60').all(ticker);
 
             if (history.length < 2)
-                return interaction.reply({ content: `Not enough price history for **${ticker}** yet. Buy or sell some shares first!`, ephemeral: true });
-
-            await interaction.deferReply();
+                return interaction.editReply({ content: `Not enough price history for **${ticker}** yet. Buy or sell some shares first!`, ephemeral: true });
 
             history.reverse();
             const prices = history.map(h => h.price);
@@ -647,22 +885,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /admin-removecompany ──────────────────────────────────────────────
         if (commandName === 'admin-removecompany') {
-            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
 
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const confirm = interaction.options.getString('confirm') ?? 'yes';
 
             if (confirm === 'no')
-                return interaction.reply({ content: `❌ Removal of **${ticker}** cancelled.`, ephemeral: true });
+                return interaction.editReply({ content: `❌ Removal of **${ticker}** cancelled.`, ephemeral: true });
 
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
             await db.prepare('DELETE FROM companies WHERE ticker = ?').run(ticker);
             await db.prepare('DELETE FROM price_history WHERE ticker = ?').run(ticker);
             await db.prepare('DELETE FROM sell_orders WHERE ticker = ?').run(ticker);
 
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: '🗑️ Company Removed',
                     description: `**${company.company_name} (${ticker})** has been deleted along with its price history and open sell orders.`,
@@ -673,11 +911,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /admin-editcompany ────────────────────────────────────────────────
         if (commandName === 'admin-editcompany') {
-            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
 
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.reply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
 
             const newName  = interaction.options.getString('name')   ?? company.company_name;
             const newOwner = interaction.options.getUser('owner');
@@ -696,7 +934,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (newPrice !== company.current_price) changes.push(`Price → **${fmt(newPrice)}** tokens`);
             if (newEmoji !== (company.emoji ?? '🏢')) changes.push(`Emoji → ${newEmoji}`);
 
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: `${newEmoji} ${newName} (${ticker}) Updated`,
                     description: changes.length ? changes.join('\n') : 'No changes made.',
@@ -707,7 +945,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /admin-addcompany ─────────────────────────────────────────────────
         if (commandName === 'admin-addcompany') {
-            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
 
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const name = interaction.options.getString('name');
@@ -717,7 +955,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const emoji = interaction.options.getString('emoji') ?? '🏢';
 
             const existing = await db.prepare('SELECT ticker FROM companies WHERE ticker = ?').get(ticker);
-            if (existing) return interaction.reply({ content: `Company **${ticker}** already exists.`, ephemeral: true });
+            if (existing) return interaction.editReply({ content: `Company **${ticker}** already exists.`, ephemeral: true });
 
             await db.prepare(`INSERT INTO companies
                 (ticker, company_name, owner_id, ipo_share_price, current_price, total_supply, shares_in_circulation, bot_share_reserve, pending_cashout_tokens, all_time_earnings, emoji)
@@ -726,7 +964,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             await recordPrice(ticker, price);
 
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: `${emoji} New Company Listed!`,
                     fields: [
@@ -743,9 +981,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /economy-backup ───────────────────────────────────────────────────
         if (commandName === 'economy-backup') {
-            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
 
-            await interaction.deferReply({ ephemeral: true });
             const code = await generateBackup();
             const buf = Buffer.from(code, 'utf-8');
             const file = new AttachmentBuilder(buf, { name: `economy-backup-${Date.now()}.txt` });
@@ -771,10 +1008,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /economy-restore ──────────────────────────────────────────────────
         if (commandName === 'economy-restore') {
-            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
 
             const attachment = interaction.options.getAttachment('backup');
-            await interaction.deferReply({ ephemeral: true });
 
             const res = await fetch(attachment.url);
             if (!res.ok) return interaction.editReply({ content: '❌ Failed to download backup file.' });
@@ -798,9 +1034,75 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
         }
 
+        // ── /setup-tickets ────────────────────────────────────────────────────
+        if (commandName === 'setup-tickets') {
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.' });
+
+            const panelChannel = await client.channels.fetch(TICKET_PANEL_CHANNEL_ID);
+            if (
+                !panelChannel ||
+                panelChannel.type !== ChannelType.GuildText ||
+                panelChannel.guildId !== interaction.guildId
+            ) {
+                return interaction.editReply({
+                    content: 'The configured ticket panel channel could not be found in this server.',
+                });
+            }
+
+            const channels = await interaction.guild.channels.fetch();
+            const category = channels.find(channel =>
+                channel.type === ChannelType.GuildCategory &&
+                channel.name === TICKET_CATEGORY_NAME
+            );
+            if (!category) {
+                return interaction.editReply({
+                    content: `The ticket category "${TICKET_CATEGORY_NAME}" could not be found.`,
+                });
+            }
+
+            const [ownerRole, representativeRole] = await Promise.all([
+                interaction.guild.roles.fetch(OWNER_ROLE_ID).catch(() => null),
+                interaction.guild.roles.fetch(REPRESENTATIVE_ROLE_ID).catch(() => null),
+            ]);
+            if (!ownerRole || !representativeRole) {
+                return interaction.editReply({
+                    content: 'The configured Owner or Representative role could not be found in this server.',
+                });
+            }
+
+            const buttonRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('ticket:open:buy_tokens')
+                    .setLabel('Buy Tokens')
+                    .setStyle(ButtonStyle.Primary),
+                new ButtonBuilder()
+                    .setCustomId('ticket:open:register_company')
+                    .setLabel('Register Company')
+                    .setStyle(ButtonStyle.Success),
+                new ButtonBuilder()
+                    .setCustomId('ticket:open:contact_us')
+                    .setLabel('Contact Us')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+
+            await panelChannel.send({
+                embeds: [{
+                    title: 'IRP Exchange Support',
+                    description: 'Choose an option below to open a private support ticket.',
+                    color: 0x5865F2,
+                }],
+                components: [buttonRow],
+                allowedMentions: { parse: [] },
+            });
+
+            return interaction.editReply({
+                content: `Ticket panel posted in ${panelChannel}.`,
+            });
+        }
+
         // ── /server-embed ──────────────────────────────────────────────────────
         if (commandName === 'server-embed') {
-            if (!isAdmin(interaction)) return interaction.reply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.' });
 
             const title = interaction.options.getString('title');
             const description = interaction.options.getString('description');
@@ -814,7 +1116,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 color = parseEmbedColor(colorInput);
                 imageUrl = validateImageUrl(imageUrlInput);
             } catch (err) {
-                return interaction.reply({ content: err.message, ephemeral: true });
+                return interaction.editReply({ content: err.message });
             }
 
             const embed = { title, color };
@@ -822,20 +1124,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (imageUrl) embed.image = { url: imageUrl };
             if (footerText) embed.footer = { text: footerText };
 
-            return interaction.reply({ embeds: [embed] });
+            return interaction.editReply({ embeds: [embed] });
         }
 
         // ── /earnings ─────────────────────────────────────────────────────────
         if (commandName === 'earnings') {
             const companies = await db.prepare('SELECT * FROM companies WHERE owner_id = ?').all(interaction.user.id);
             if (companies.length === 0)
-                return interaction.reply({ content: 'You do not own any companies.', ephemeral: true });
+                return interaction.editReply({ content: 'You do not own any companies.' });
 
             const fields = companies.flatMap(c => [
                 { name: `${c.ticker} — ${c.company_name}`, value: `This week: **${fmt(c.pending_cashout_tokens)}** tokens\nAll time: **${fmt(c.all_time_earnings)}** tokens`, inline: false },
             ]);
 
-            return interaction.reply({
+            return interaction.editReply({
                 embeds: [{
                     title: `💼 Your Company Earnings`,
                     fields,
@@ -848,11 +1150,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (err) {
         console.error(`Error in /${commandName}:`, err);
         const msg = { content: 'Something went wrong. Please try again.', ephemeral: true };
-        if (interaction.replied || interaction.deferred) {
-            interaction.followUp(msg);
-        } else {
-            interaction.reply(msg);
-        }
+        await interaction.editReply(msg).catch(() => {});
+    }
+});
+
+client.on(Events.MessageCreate, async (message) => {
+    if (
+        message.author.bot ||
+        !client.user ||
+        !message.mentions.users.has(client.user.id)
+    ) {
+        return;
+    }
+
+    try {
+        await message.reply({
+            content: 'I am just a utility bot and cannot help you with any task. Ask owner or representative for support.\n\nNote: I am not an AI',
+            allowedMentions: { repliedUser: false },
+        });
+    } catch (error) {
+        console.error('Failed to send mention auto-reply:', error);
     }
 });
 

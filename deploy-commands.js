@@ -101,6 +101,11 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
+        .setName('setup-tickets')
+        .setDescription('Admin: Post the IRP Exchange Support ticket panel')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+    new SlashCommandBuilder()
         .setName('server-embed')
         .setDescription('Admin: Post a custom rich embed in this channel')
         .addStringOption(o => o.setName('title').setDescription('Embed title').setRequired(true).setMaxLength(256))
