@@ -90,6 +90,15 @@ const commands = [
         .setDescription('View your company earnings this week and all time'),
 
     new SlashCommandBuilder()
+        .setName('today-exchange-stat')
+        .setDescription("View today's exchange trading report"),
+
+    new SlashCommandBuilder()
+        .setName('exchange-balance')
+        .setDescription('Admin: View exchange fee balances')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+    new SlashCommandBuilder()
         .setName('economy-backup')
         .setDescription('Admin: Generate a full economy backup file')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),

@@ -45,6 +45,20 @@ const schema = `
         list_price REAL NOT NULL,
         timestamp INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS trade_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        buyer_id TEXT NOT NULL,
+        seller_id TEXT NOT NULL,
+        shares INTEGER NOT NULL,
+        trade_value REAL NOT NULL,
+        fee_amount REAL NOT NULL,
+        timestamp INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_trade_ledger_timestamp
+        ON trade_ledger (timestamp);
 `;
 
 function toArgs(params) {

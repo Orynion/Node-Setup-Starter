@@ -34,6 +34,8 @@ const TICKET_PANEL_CHANNEL_ID = '1543951837235904512';
 const TICKET_CATEGORY_NAME = '「📩」Contact Us------------------';
 const OWNER_ROLE_ID = '1478001619030511747';
 const REPRESENTATIVE_ROLE_ID = '1543952151364116490';
+const EXCHANGE_OWNER_ID = '1416700285111505029';
+const EXCHANGE_FEE_RATE = 0.01;
 const TICKET_TYPES = new Map([
     ['buy_tokens', {
         slug: 'buy-tokens',
@@ -81,6 +83,15 @@ function isAdmin(interaction) {
 
 function fmt(n) {
     return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function calculateExchangeFee(tradeValue) {
+    return Number((tradeValue * EXCHANGE_FEE_RATE).toFixed(8));
+}
+
+function startOfTodayUtc() {
+    const now = new Date();
+    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 }
 
 async function recordPrice(ticker, price) {
@@ -323,7 +334,8 @@ async function generateBackup() {
     const companies = await db.prepare('SELECT * FROM companies').all();
     const priceHistory = await db.prepare('SELECT * FROM price_history ORDER BY timestamp ASC').all();
     const sellOrders = await db.prepare('SELECT * FROM sell_orders').all();
-    const payload = { v: 1, ts: Date.now(), users, companies, priceHistory, sellOrders };
+    const tradeLedger = await db.prepare('SELECT * FROM trade_ledger ORDER BY timestamp ASC, id ASC').all();
+    const payload = { v: 1, ts: Date.now(), users, companies, priceHistory, sellOrders, tradeLedger };
     const compressed = await deflate(Buffer.from(JSON.stringify(payload)));
     return compressed.toString('base64');
 }
@@ -335,6 +347,7 @@ async function restoreBackup(code) {
 
     await db.transaction(async tx => {
         await tx.prepare('DELETE FROM sell_orders').run();
+        await tx.prepare('DELETE FROM trade_ledger').run();
         await tx.prepare('DELETE FROM price_history').run();
         await tx.prepare('DELETE FROM companies').run();
         await tx.prepare('DELETE FROM users').run();
@@ -353,6 +366,10 @@ async function restoreBackup(code) {
 
         for (const s of data.sellOrders)
             await tx.prepare('INSERT INTO sell_orders (id, seller_id, ticker, shares, list_price, timestamp) VALUES (?, ?, ?, ?, ?, ?)').run(s.id, s.seller_id, s.ticker, s.shares, s.list_price, s.timestamp);
+
+        for (const t of data.tradeLedger ?? [])
+            await tx.prepare('INSERT INTO trade_ledger (id, ticker, buyer_id, seller_id, shares, trade_value, fee_amount, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+                .run(t.id, t.ticker, t.buyer_id, t.seller_id, t.shares, t.trade_value, t.fee_amount, t.timestamp);
     });
 
     return data;
@@ -634,49 +651,93 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (buyer.wallet_tokens < totalCost)
                     return interaction.editReply({ content: `Insufficient tokens. Need **${fmt(totalCost)}**, you have **${fmt(buyer.wallet_tokens)}**.`, ephemeral: true });
 
-            // Process sell orders
-            for (const { order, fill } of ordersToFill) {
-                await getOrCreateUser(order.seller_id);
-                await db.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?').run(fill * order.list_price, order.seller_id);
-                if (fill === order.shares) {
-                    await db.prepare('DELETE FROM sell_orders WHERE id = ?').run(order.id);
-                } else {
-                    await db.prepare('UPDATE sell_orders SET shares = shares - ? WHERE id = ?').run(fill, order.id);
-                }
-            }
-
-            // Process bot pool shares
             let newPrice = company.current_price;
-            if (sharesFromBot > 0) {
-                const ownerEarnings = sharesFromBot * company.current_price;
-                newPrice = adjustPrice(company.current_price, sharesFromBot, 'up');
-                await db.prepare(`UPDATE companies SET
-                    bot_share_reserve = bot_share_reserve - ?,
-                    shares_in_circulation = shares_in_circulation + ?,
-                    current_price = ?,
-                    pending_cashout_tokens = pending_cashout_tokens + ?,
-                    all_time_earnings = all_time_earnings + ?
-                    WHERE ticker = ?`
-                ).run(sharesFromBot, sharesFromBot, newPrice, ownerEarnings, ownerEarnings, ticker);
-                await getOrCreateUser(company.owner_id);
-                await db.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?').run(ownerEarnings, company.owner_id);
-                await recordPrice(ticker, newPrice);
-            }
+            let totalFees = 0;
+            let completedTrades = 0;
+            const tradeTimestamp = Date.now();
 
-            // Deduct buyer tokens and update portfolio
-            portfolio[ticker] = (portfolio[ticker] || 0) + amount;
-            await db.prepare('UPDATE users SET wallet_tokens = wallet_tokens - ?, portfolio = ? WHERE discord_id = ?')
-                .run(totalCost, JSON.stringify(portfolio), interaction.user.id);
+            await db.transaction(async tx => {
+                await tx.prepare('INSERT OR IGNORE INTO users (discord_id, wallet_tokens, portfolio) VALUES (?, 0, ?)')
+                    .run(EXCHANGE_OWNER_ID, '{}');
+
+                // Complete trades against user sell orders. The buyer pays the gross
+                // trade value; the seller receives the value less the exchange fee.
+                for (const { order, fill } of ordersToFill) {
+                    const tradeValue = Number((fill * order.list_price).toFixed(8));
+                    const feeAmount = calculateExchangeFee(tradeValue);
+                    const sellerPayout = tradeValue - feeAmount;
+                    totalFees += feeAmount;
+                    completedTrades += 1;
+
+                    await tx.prepare('INSERT OR IGNORE INTO users (discord_id, wallet_tokens, portfolio) VALUES (?, 0, ?)')
+                        .run(order.seller_id, '{}');
+                    await tx.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?')
+                        .run(sellerPayout, order.seller_id);
+
+                    if (fill === order.shares) {
+                        await tx.prepare('DELETE FROM sell_orders WHERE id = ?').run(order.id);
+                    } else {
+                        await tx.prepare('UPDATE sell_orders SET shares = shares - ? WHERE id = ?').run(fill, order.id);
+                    }
+
+                    await tx.prepare(`INSERT INTO trade_ledger
+                        (ticker, buyer_id, seller_id, shares, trade_value, fee_amount, timestamp)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)`
+                    ).run(ticker, interaction.user.id, order.seller_id, fill, tradeValue, feeAmount, tradeTimestamp);
+                }
+
+                // Complete any remaining shares against the bot reserve. The company
+                // owner receives the net value, while the exchange owner receives the fee.
+                if (sharesFromBot > 0) {
+                    const botTradeValue = Number((sharesFromBot * company.current_price).toFixed(8));
+                    const feeAmount = calculateExchangeFee(botTradeValue);
+                    const ownerEarnings = botTradeValue - feeAmount;
+                    totalFees += feeAmount;
+                    completedTrades += 1;
+                    newPrice = adjustPrice(company.current_price, sharesFromBot, 'up');
+
+                    await tx.prepare(`UPDATE companies SET
+                        bot_share_reserve = bot_share_reserve - ?,
+                        shares_in_circulation = shares_in_circulation + ?,
+                        current_price = ?,
+                        pending_cashout_tokens = pending_cashout_tokens + ?,
+                        all_time_earnings = all_time_earnings + ?
+                        WHERE ticker = ?`
+                    ).run(sharesFromBot, sharesFromBot, newPrice, ownerEarnings, ownerEarnings, ticker);
+                    await tx.prepare('INSERT OR IGNORE INTO users (discord_id, wallet_tokens, portfolio) VALUES (?, 0, ?)')
+                        .run(company.owner_id, '{}');
+                    await tx.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?')
+                        .run(ownerEarnings, company.owner_id);
+                    await tx.prepare('INSERT INTO price_history (ticker, price, timestamp) VALUES (?, ?, ?)')
+                        .run(ticker, newPrice, tradeTimestamp);
+                    await tx.prepare(`INSERT INTO trade_ledger
+                        (ticker, buyer_id, seller_id, shares, trade_value, fee_amount, timestamp)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)`
+                    ).run(ticker, interaction.user.id, company.owner_id, sharesFromBot, botTradeValue, feeAmount, tradeTimestamp);
+                }
+
+                await tx.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?')
+                    .run(totalFees, EXCHANGE_OWNER_ID);
+
+                // Deduct the gross trade value from the buyer and update the portfolio.
+                portfolio[ticker] = (portfolio[ticker] || 0) + amount;
+                await tx.prepare('UPDATE users SET wallet_tokens = wallet_tokens - ?, portfolio = ? WHERE discord_id = ?')
+                    .run(totalCost, JSON.stringify(portfolio), interaction.user.id);
+            });
+
+            console.log(`Completed ${completedTrades} ${ticker} trade(s); exchange fee: ${fmt(totalFees)} tokens.`);
 
             const sharesFromOrders = amount - sharesFromBot;
             return interaction.editReply({
                 embeds: [{
                     title: `📈 Bought ${amount} shares of ${ticker}`,
                     fields: [
-                        { name: 'Total Cost', value: `${fmt(totalCost)} tokens`, inline: true },
+                        { name: 'Trade Value', value: `${fmt(totalCost)} tokens`, inline: true },
+                        { name: 'Exchange Fee (1%)', value: `${fmt(totalFees)} tokens`, inline: true },
                         { name: 'New Price', value: `${fmt(newPrice)} tokens`, inline: true },
                         { name: 'From Sellers', value: `${sharesFromOrders} shares`, inline: true },
                         { name: 'From Bot Reserve', value: `${sharesFromBot} shares`, inline: true },
+                        { name: 'Completed Trades', value: `${completedTrades}`, inline: true },
                     ],
                     color: 0x57F287,
                 }]
@@ -1144,6 +1205,70 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     color: 0x5865F2,
                 }],
                 ephemeral: true,
+            });
+        }
+
+        // ── /today-exchange-stat ───────────────────────────────────────────────
+        if (commandName === 'today-exchange-stat') {
+            const todayStart = startOfTodayUtc();
+            const [stats, activeTraders] = await Promise.all([
+                db.prepare(`SELECT
+                    COALESCE(SUM(trade_value), 0) AS trading_volume,
+                    COUNT(*) AS trades_completed,
+                    COUNT(DISTINCT ticker) AS unique_companies,
+                    COALESCE(SUM(fee_amount), 0) AS exchange_fees
+                    FROM trade_ledger
+                    WHERE timestamp >= ?`
+                ).get(todayStart),
+                db.prepare(`SELECT COUNT(*) AS active_traders
+                    FROM (
+                        SELECT buyer_id AS trader_id
+                        FROM trade_ledger
+                        WHERE timestamp >= ?
+                        UNION
+                        SELECT seller_id AS trader_id
+                        FROM trade_ledger
+                        WHERE timestamp >= ?
+                    )`
+                ).get(todayStart, todayStart),
+            ]);
+
+            return interaction.editReply({
+                embeds: [{
+                    title: 'LAX Daily Exchange Report',
+                    description: 'Completed stock trade activity for today (UTC).',
+                    fields: [
+                        { name: 'Trading Volume', value: `${fmt(stats.trading_volume)} tokens`, inline: true },
+                        { name: 'Trades Completed', value: `${stats.trades_completed}`, inline: true },
+                        { name: 'Unique Companies Traded', value: `${stats.unique_companies}`, inline: true },
+                        { name: 'Active Traders', value: `${activeTraders.active_traders}`, inline: true },
+                        { name: 'Exchange Fees Earned', value: `${fmt(stats.exchange_fees)} tokens`, inline: true },
+                    ],
+                    color: 0x5865F2,
+                    timestamp: new Date(),
+                }],
+            });
+        }
+
+        // ── /exchange-balance ───────────────────────────────────────────────────
+        if (commandName === 'exchange-balance') {
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
+
+            const todayStart = startOfTodayUtc();
+            const [today, allTime] = await Promise.all([
+                db.prepare('SELECT COALESCE(SUM(fee_amount), 0) AS fees FROM trade_ledger WHERE timestamp >= ?').get(todayStart),
+                db.prepare('SELECT COALESCE(SUM(fee_amount), 0) AS fees FROM trade_ledger').get(),
+            ]);
+
+            return interaction.editReply({
+                embeds: [{
+                    title: 'IRPExchange Balance',
+                    fields: [
+                        { name: "Today's Fees Earned", value: `${fmt(today.fees)} tokens`, inline: true },
+                        { name: 'Total Fees Earned', value: `${fmt(allTime.fees)} tokens`, inline: true },
+                    ],
+                    color: 0x57F287,
+                }],
             });
         }
 
