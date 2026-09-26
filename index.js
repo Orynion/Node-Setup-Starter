@@ -478,7 +478,7 @@ client.once(Events.ClientReady, async () => {
     console.log('Bot is online!');
     console.log(`Bot is currently in ${client.guilds.cache.size} server(s).`);
     console.log('Database ready!');
-    await registerCommands();
+    await registerCommands(process.env.GUILD_ID, client);
 
     const backupChannelId = process.env.BACKUP_CHANNEL_ID;
     if (backupChannelId) {

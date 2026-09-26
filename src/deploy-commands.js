@@ -125,22 +125,59 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(cmd => cmd.toJSON());
 
-async function registerCommands() {
+async function registerCommands(targetGuildId, clientInstance) {
     if (!process.env.TOKEN || !process.env.CLIENT_ID) {
         console.warn('Discord TOKEN or CLIENT_ID not provided. Skipping slash command registration.');
         return;
     }
     const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+    const clientId = process.env.CLIENT_ID;
+
+    // 1. Clear global commands to ensure no duplicate global registration exists
     try {
-        console.log('Registering slash commands...');
+        console.log('Clearing any global commands to prevent duplicate registration...');
         await rest.put(
-            Routes.applicationCommands(process.env.CLIENT_ID),
-            { body: commands }
+            Routes.applicationCommands(clientId),
+            { body: [] }
         );
-        console.log('Slash commands registered!');
+        console.log('Global slash commands cleared.');
     } catch (error) {
-        console.error('Failed to register commands:', error);
+        console.warn('Note: Could not clear global commands:', error.message);
+    }
+
+    // 2. Resolve target guild ID(s)
+    let guildIds = [];
+    if (targetGuildId) {
+        guildIds = [targetGuildId];
+    } else if (process.env.GUILD_ID || process.env.SERVER_ID || process.env.DISCORD_GUILD_ID) {
+        const rawGuilds = (process.env.GUILD_ID || process.env.SERVER_ID || process.env.DISCORD_GUILD_ID).trim();
+        guildIds = rawGuilds.split(',').map(id => id.trim()).filter(Boolean);
+    } else if (clientInstance?.guilds?.cache?.size) {
+        guildIds = Array.from(clientInstance.guilds.cache.keys());
+    }
+
+    if (guildIds.length === 0) {
+        console.warn('No GUILD_ID provided in environment variables and no cached guilds found. Guild commands could not be deployed.');
+        return;
+    }
+
+    // 3. Register commands for each targeted guild
+    for (const guildId of guildIds) {
+        try {
+            console.log(`Registering ${commands.length} guild slash commands for guild: ${guildId}...`);
+            await rest.put(
+                Routes.applicationGuildCommands(clientId, guildId),
+                { body: commands }
+            );
+            console.log(`Guild slash commands successfully registered for guild ${guildId}!`);
+        } catch (error) {
+            console.error(`Failed to register guild commands for guild ${guildId}:`, error);
+        }
     }
 }
 
-module.exports = { registerCommands };
+if (require.main === module) {
+    registerCommands();
+}
+
+module.exports = { registerCommands, commands };
