@@ -86,6 +86,13 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
+        .setName('provide-shares')
+        .setDescription('Company Owner/Admin: Transfer unallocated reserve shares to a user')
+        .addStringOption(o => o.setName('ticker').setDescription('Company ticker symbol').setRequired(true))
+        .addUserOption(o => o.setName('user').setDescription('Recipient user').setRequired(true))
+        .addIntegerOption(o => o.setName('amount').setDescription('Number of shares to provide').setRequired(true).setMinValue(1)),
+
+    new SlashCommandBuilder()
         .setName('earnings')
         .setDescription('View your company earnings this week and all time'),
 

@@ -1004,6 +1004,84 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
         }
 
+        // ── /provide-shares ───────────────────────────────────────────────────
+        if (commandName === 'provide-shares') {
+            const ticker = interaction.options.getString('ticker').toUpperCase();
+            const targetUser = interaction.options.getUser('user');
+            const amount = interaction.options.getInteger('amount');
+
+            if (amount <= 0) {
+                return interaction.editReply({ content: 'Amount must be greater than 0.', ephemeral: true });
+            }
+
+            const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            if (!company) {
+                return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            }
+
+            // Verify authorization: must be either server admin or the registered company owner
+            const isAuthorized = isAdmin(interaction) || company.owner_id === interaction.user.id;
+            if (!isAuthorized) {
+                return interaction.editReply({
+                    content: `Unauthorized: Only the company owner (<@${company.owner_id}>) or server administrators can provide shares for **${ticker}**.`,
+                    ephemeral: true,
+                });
+            }
+
+            // Validate that the company has enough unallocated reserve shares
+            if (company.bot_share_reserve < amount) {
+                return interaction.editReply({
+                    content: `Insufficient unallocated shares. **${ticker}** has **${company.bot_share_reserve.toLocaleString()}** unallocated shares in reserve, but you requested **${amount.toLocaleString()}**.`,
+                    ephemeral: true,
+                });
+            }
+
+            const recipient = await getOrCreateUser(targetUser.id);
+            const portfolio = getPortfolio(recipient);
+            const tradeTimestamp = Date.now();
+
+            // Execute atomic transfer:
+            // 1. Deduct from bot_share_reserve and add to shares_in_circulation (total_supply & current_price untouched)
+            // 2. Add shares to recipient user portfolio
+            // 3. Log transaction in trade_ledger
+            await db.transaction(async tx => {
+                await tx.prepare(`UPDATE companies SET
+                    bot_share_reserve = bot_share_reserve - ?,
+                    shares_in_circulation = shares_in_circulation + ?
+                    WHERE ticker = ?`
+                ).run(amount, amount, ticker);
+
+                portfolio[ticker] = (portfolio[ticker] || 0) + amount;
+                await tx.prepare('UPDATE users SET portfolio = ? WHERE discord_id = ?')
+                    .run(JSON.stringify(portfolio), targetUser.id);
+
+                await tx.prepare(`INSERT INTO trade_ledger
+                    (ticker, buyer_id, seller_id, shares, trade_value, fee_amount, timestamp)
+                    VALUES (?, ?, ?, ?, 0, 0, ?)`
+                ).run(ticker, targetUser.id, company.owner_id, amount, tradeTimestamp);
+            });
+
+            const remainingReserve = company.bot_share_reserve - amount;
+            const newCirculation = company.shares_in_circulation + amount;
+            const emoji = company.emoji ?? '🏢';
+
+            return interaction.editReply({
+                embeds: [{
+                    title: `📦 ${emoji} Shares Provided: ${company.company_name} (${ticker})`,
+                    description: `Successfully transferred **${amount.toLocaleString()}** unallocated shares to <@${targetUser.id}>.`,
+                    fields: [
+                        { name: 'Recipient', value: `<@${targetUser.id}> (${targetUser.username})`, inline: true },
+                        { name: 'Shares Provided', value: `${amount.toLocaleString()}`, inline: true },
+                        { name: 'Remaining Unallocated', value: `${remainingReserve.toLocaleString()}`, inline: true },
+                        { name: 'In Circulation', value: `${newCirculation.toLocaleString()}`, inline: true },
+                        { name: 'Total Supply', value: `${company.total_supply.toLocaleString()}`, inline: true },
+                        { name: 'Current Share Price', value: `${fmt(company.current_price)} tokens`, inline: true },
+                    ],
+                    color: 0x57F287,
+                }]
+            });
+        }
+
         // ── /admin-addcompany ─────────────────────────────────────────────────
         if (commandName === 'admin-addcompany') {
             if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
