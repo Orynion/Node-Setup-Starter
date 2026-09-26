@@ -13,8 +13,8 @@ const zlib = require('zlib');
 const { promisify } = require('util');
 const express = require('express');
 require('dotenv').config();
-const db = require('./database.js');
-const { registerCommands } = require('./deploy-commands.js');
+const db = require('./src/database.js');
+const { registerCommands } = require('./src/deploy-commands.js');
 
 const deflate = promisify(zlib.deflate);
 const inflate = promisify(zlib.inflate);
