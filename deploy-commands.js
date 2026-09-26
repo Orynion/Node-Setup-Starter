@@ -125,9 +125,12 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(cmd => cmd.toJSON());
 
-const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-
 async function registerCommands() {
+    if (!process.env.TOKEN || !process.env.CLIENT_ID) {
+        console.warn('Discord TOKEN or CLIENT_ID not provided. Skipping slash command registration.');
+        return;
+    }
+    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     try {
         console.log('Registering slash commands...');
         await rest.put(

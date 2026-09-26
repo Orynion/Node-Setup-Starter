@@ -1298,4 +1298,10 @@ client.on(Events.MessageCreate, async (message) => {
     }
 });
 
-client.login(process.env.TOKEN);
+if (process.env.TOKEN) {
+    client.login(process.env.TOKEN).catch(err => {
+        console.error('Failed to log in to Discord:', err.message);
+    });
+} else {
+    console.warn('Discord TOKEN not provided in environment variables.');
+}

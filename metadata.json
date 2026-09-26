@@ -1,0 +1,8 @@
+{
+  "name": "Discord Economy Bot",
+  "description": "Discord Bot for virtual stock exchange, tickets, and economy management with Express health server.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

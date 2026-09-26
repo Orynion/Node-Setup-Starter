@@ -1,13 +1,9 @@
 const { createClient } = require('@libsql/client');
 
-const url = process.env.TURSO_DATABASE_URL;
+const url = process.env.TURSO_DATABASE_URL || 'file:data.db';
 const authToken = process.env.TURSO_AUTH_TOKEN;
 
-if (!url || !authToken) {
-    throw new Error('TURSO_DATABASE_URL and TURSO_AUTH_TOKEN must be configured.');
-}
-
-const client = createClient({ url, authToken });
+const client = createClient(authToken ? { url, authToken } : { url });
 
 const schema = `
     CREATE TABLE IF NOT EXISTS users (
@@ -91,13 +87,17 @@ class TursoDatabase {
     }
 
     async initialize() {
-        await client.executeMultiple(schema);
         try {
-            await client.execute('ALTER TABLE companies ADD COLUMN all_time_earnings REAL NOT NULL DEFAULT 0');
-        } catch (_) {}
-        try {
-            await client.execute("ALTER TABLE companies ADD COLUMN emoji TEXT NOT NULL DEFAULT '🏢'");
-        } catch (_) {}
+            await client.executeMultiple(schema);
+            try {
+                await client.execute('ALTER TABLE companies ADD COLUMN all_time_earnings REAL NOT NULL DEFAULT 0');
+            } catch (_) {}
+            try {
+                await client.execute("ALTER TABLE companies ADD COLUMN emoji TEXT NOT NULL DEFAULT '🏢'");
+            } catch (_) {}
+        } catch (err) {
+            console.error('Database initialization note:', err.message);
+        }
     }
 
     prepare(sql) {
