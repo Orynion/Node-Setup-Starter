@@ -61,7 +61,7 @@ test('Conversational Flow: Normal response is returned with proper model and sys
     assert.strictEqual(res.success, true);
     assert.strictEqual(res.question, 'What is instant sell?');
     assert.ok(res.answer.includes('LAX Treasury'));
-    assert.strictEqual(capturedPayload.model, 'gemini-3.8-flash');
+    assert.strictEqual(capturedPayload.model, 'gemini-3.5-flash-lite');
     assert.strictEqual(capturedPayload.config.systemInstruction, LAX_SYSTEM_INSTRUCTION);
     assert.strictEqual(capturedPayload.contents[0].parts[0].text, 'What is instant sell?');
 });

@@ -194,7 +194,7 @@ async function askLaxAi({ question, userId = 'default_user', clientOverride = nu
         });
 
         const response = await aiClient.models.generateContent({
-            model: 'gemini-3.8-flash',
+            model: 'gemini-3.5-flash-lite',
             contents,
             config: {
                 systemInstruction: LAX_SYSTEM_INSTRUCTION,
