@@ -22,6 +22,7 @@ test('Slash command definitions verification', () => {
 
     const provideShares = commands.find(c => c.name === 'provide-shares');
     assert.ok(provideShares, '/provide-shares must exist');
+    assert.ok(provideShares.default_member_permissions !== undefined, '/provide-shares must have admin permissions set');
 
     // Check all essential commands are present
     const expected = [

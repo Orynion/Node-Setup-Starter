@@ -498,9 +498,15 @@ function buildPriceChart(prices, timestamps) {
 
 client.once(Events.ClientReady, async () => {
     await db.ready;
+    const userCount = (await db.prepare('SELECT COUNT(*) as n FROM users').get())?.n ?? 0;
+    const companyCount = (await db.prepare('SELECT COUNT(*) as n FROM companies').get())?.n ?? 0;
+
     console.log('Bot is online!');
     console.log(`Bot is currently in ${client.guilds.cache.size} server(s).`);
-    console.log('Database ready!');
+    console.log(`[Database Status] Mode: ${db.isRemote ? 'Remote Turso Cloud' : 'Local SQLite (data.db)'} | Companies: ${companyCount} | Registered Users: ${userCount}`);
+    if (!db.isRemote) {
+        console.warn('⚠️ [Database Notice] Bot is currently running on Local SQLite storage because TURSO_DATABASE_URL is not set in your server environment. If your data is in Turso, please configure TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in your .env or host settings.');
+    }
     await registerCommands(process.env.GUILD_ID, client);
 
     const backupChannelId = process.env.BACKUP_CHANNEL_ID;
@@ -511,13 +517,12 @@ client.once(Events.ClientReady, async () => {
                 const code = await generateBackup();
                 const buf = Buffer.from(code, 'utf-8');
                 const file = new AttachmentBuilder(buf, { name: `economy-backup-${Date.now()}.txt` });
-                const userCount = (await db.prepare('SELECT COUNT(*) as n FROM users').get()).n;
-                const companyCount = (await db.prepare('SELECT COUNT(*) as n FROM companies').get()).n;
                 await channel.send({
                     embeds: [{
                         title: '🔄 Auto Backup — Bot Started',
                         description: `Snapshot taken on startup. Use \`/economy-restore\` and upload this file to restore.`,
                         fields: [
+                            { name: 'Database Mode', value: db.isRemote ? 'Turso Cloud' : 'Local SQLite', inline: true },
                             { name: 'Users', value: `${userCount}`, inline: true },
                             { name: 'Companies', value: `${companyCount}`, inline: true },
                             { name: 'Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false },
@@ -544,6 +549,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (!interaction.isChatInputCommand()) return;
+    if (interaction.replied || interaction.deferred) return;
 
     const { commandName } = interaction;
 
@@ -1033,6 +1039,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /provide-shares ───────────────────────────────────────────────────
         if (commandName === 'provide-shares') {
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
+
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const targetUser = interaction.options.getUser('user');
             const amount = interaction.options.getInteger('amount');
@@ -1044,15 +1052,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
             if (!company) {
                 return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
-            }
-
-            // Verify authorization: must be either server admin or the registered company owner
-            const isAuthorized = isAdmin(interaction) || company.owner_id === interaction.user.id;
-            if (!isAuthorized) {
-                return interaction.editReply({
-                    content: `Unauthorized: Only the company owner (<@${company.owner_id}>) or server administrators can provide shares for **${ticker}**.`,
-                    ephemeral: true,
-                });
             }
 
             // Validate that the company has enough unallocated reserve shares

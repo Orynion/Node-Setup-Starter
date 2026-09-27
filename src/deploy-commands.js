@@ -87,10 +87,11 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('provide-shares')
-        .setDescription('Company Owner/Admin: Transfer unallocated reserve shares to a user')
+        .setDescription('Admin: Transfer unallocated reserve shares to a user')
         .addStringOption(o => o.setName('ticker').setDescription('Company ticker symbol').setRequired(true))
         .addUserOption(o => o.setName('user').setDescription('Recipient user').setRequired(true))
-        .addIntegerOption(o => o.setName('amount').setDescription('Number of shares to provide').setRequired(true).setMinValue(1)),
+        .addIntegerOption(o => o.setName('amount').setDescription('Number of shares to provide').setRequired(true).setMinValue(1))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
         .setName('history')

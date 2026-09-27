@@ -1,7 +1,44 @@
+const fs = require('fs');
+const path = require('path');
+const dotenv = require('dotenv');
 const { createClient } = require('@libsql/client');
 
-const url = process.env.TURSO_DATABASE_URL || 'file:data.db';
-const authToken = process.env.TURSO_AUTH_TOKEN;
+// Load .env first, then override with .nexushost/nexushost.env if present
+dotenv.config();
+const nexusEnvPath = path.join(process.cwd(), '.nexushost', 'nexushost.env');
+if (fs.existsSync(nexusEnvPath)) {
+    dotenv.config({ path: nexusEnvPath, override: true });
+}
+
+const rawUrl = (
+    process.env.TURSO_DATABASE_URL ||
+    process.env.TURSO_URL ||
+    process.env.DATABASE_URL ||
+    process.env.LIBSQL_URL ||
+    ''
+).trim();
+
+const rawToken = (
+    process.env.TURSO_AUTH_TOKEN ||
+    process.env.TURSO_TOKEN ||
+    process.env.DATABASE_AUTH_TOKEN ||
+    process.env.LIBSQL_AUTH_TOKEN ||
+    ''
+).trim();
+
+const isRemoteTurso = Boolean(rawUrl && !rawUrl.startsWith('file:'));
+const url = rawUrl || 'file:data.db';
+const authToken = rawToken || undefined;
+
+if (isRemoteTurso) {
+    const maskedUrl = url.replace(/(:\/\/[^@]+@)/, '://***@');
+    console.log(`[Database] Initializing remote Turso connection to: ${maskedUrl}`);
+    if (!authToken) {
+        console.warn('[Database] WARNING: Turso database URL provided without TURSO_AUTH_TOKEN. Connection may fail if authentication is required.');
+    }
+} else {
+    console.warn('[Database] Notice: No remote Turso URL found in environment variables (TURSO_DATABASE_URL). Using local SQLite storage (file:data.db).');
+}
 
 const client = createClient(authToken ? { url, authToken } : { url });
 
@@ -58,31 +95,52 @@ const schema = `
 `;
 
 function toArgs(params) {
-    return params.length === 1 && Array.isArray(params[0]) ? params[0] : params;
+    if (params.length === 0) return [];
+    if (params.length === 1 && Array.isArray(params[0])) return params[0];
+    return params;
 }
 
 function createPreparedStatement(executor, sql) {
     return {
         async run(...params) {
-            const result = await executor.execute({ sql, args: toArgs(params) });
-            return {
-                changes: Number(result.rowsAffected ?? 0),
-                lastInsertRowid: result.lastInsertRowid,
-            };
+            const args = toArgs(params);
+            try {
+                const result = await executor.execute({ sql, args });
+                return {
+                    changes: Number(result.rowsAffected ?? 0),
+                    lastInsertRowid: result.lastInsertRowid,
+                };
+            } catch (err) {
+                console.error(`[Database Error] run() failed for query: "${sql}" args: ${JSON.stringify(args)}:`, err.message);
+                throw err;
+            }
         },
         async get(...params) {
-            const result = await executor.execute({ sql, args: toArgs(params) });
-            return result.rows[0];
+            const args = toArgs(params);
+            try {
+                const result = await executor.execute({ sql, args });
+                return result.rows?.[0];
+            } catch (err) {
+                console.error(`[Database Error] get() failed for query: "${sql}" args: ${JSON.stringify(args)}:`, err.message);
+                throw err;
+            }
         },
         async all(...params) {
-            const result = await executor.execute({ sql, args: toArgs(params) });
-            return result.rows;
+            const args = toArgs(params);
+            try {
+                const result = await executor.execute({ sql, args });
+                return result.rows ?? [];
+            } catch (err) {
+                console.error(`[Database Error] all() failed for query: "${sql}" args: ${JSON.stringify(args)}:`, err.message);
+                throw err;
+            }
         },
     };
 }
 
 class TursoDatabase {
     constructor() {
+        this.isRemote = isRemoteTurso;
         this.ready = this.initialize();
     }
 
@@ -95,8 +153,9 @@ class TursoDatabase {
             try {
                 await client.execute("ALTER TABLE companies ADD COLUMN emoji TEXT NOT NULL DEFAULT '🏢'");
             } catch (_) {}
+            console.log(`[Database] Database ready and verified (${this.isRemote ? 'Turso Cloud' : 'Local SQLite'}).`);
         } catch (err) {
-            console.error('Database initialization note:', err.message);
+            console.error('[Database] Database initialization note:', err.message);
         }
     }
 
@@ -116,6 +175,7 @@ class TursoDatabase {
             await transaction.commit();
             return result;
         } catch (error) {
+            console.error('[Database Transaction Error]:', error.message);
             await transaction.rollback();
             throw error;
         }
