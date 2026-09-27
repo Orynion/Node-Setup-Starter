@@ -555,7 +555,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     try {
         await interaction.deferReply();
+    } catch (deferError) {
+        if (deferError.code === 10062 || deferError.code === 40060) {
+            console.warn(`[InteractionLifecycle] Interaction for /${commandName} expired or was already handled by another process (Discord code ${deferError.code}).`);
+            return;
+        }
+        console.error(`[InteractionLifecycle] Failed to defer /${commandName}:`, deferError);
+        return;
+    }
 
+    try {
         // ── /balance ──────────────────────────────────────────────────────────
         if (commandName === 'balance') {
             const user = await getOrCreateUser(interaction.user.id);
