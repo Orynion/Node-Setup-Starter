@@ -90,8 +90,26 @@ const schema = `
         timestamp INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS cashout_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        amount REAL NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        channel_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        admin_id TEXT,
+        admin_note TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_trade_ledger_timestamp
         ON trade_ledger (timestamp);
+
+    CREATE INDEX IF NOT EXISTS idx_cashout_requests_user
+        ON cashout_requests (user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_cashout_requests_status
+        ON cashout_requests (status);
 `;
 
 function toArgs(params) {

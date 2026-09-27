@@ -8,6 +8,9 @@ const {
     ButtonBuilder,
     ButtonStyle,
     ChannelType,
+    ModalBuilder,
+    TextInputBuilder,
+    TextInputStyle,
 } = require('discord.js');
 const zlib = require('zlib');
 const { promisify } = require('util');
@@ -15,6 +18,13 @@ const express = require('express');
 require('dotenv').config();
 const db = require('./src/database.js');
 const { registerCommands } = require('./src/deploy-commands.js');
+const {
+    MAX_CASHOUT_AMOUNT,
+    validateCashoutAmount,
+    createCashoutRequest,
+    approveCashoutRequest,
+    rejectCashoutRequest,
+} = require('./src/cashout.js');
 
 const deflate = promisify(zlib.deflate);
 const inflate = promisify(zlib.inflate);
@@ -46,6 +56,11 @@ const TICKET_TYPES = new Map([
         slug: 'register-company',
         label: 'Register Company',
         description: 'Please provide the company name, ticker symbol, and owner.',
+    }],
+    ['cashout', {
+        slug: 'cashout',
+        label: 'Cashout Request',
+        description: 'Request a cashout for your LAX wallet tokens (Max: 8,000 tokens).',
     }],
     ['contact_us', {
         slug: 'contact-us',
@@ -352,6 +367,269 @@ async function handleTicketButton(interaction) {
     }
 }
 
+async function getOrCreateCashoutTicketChannel(guild, user) {
+    const channels = await guild.channels.fetch();
+    const category = channels.find(channel =>
+        channel.type === ChannelType.GuildCategory &&
+        channel.name === TICKET_CATEGORY_NAME
+    );
+
+    const targetTopic = `ticket:cashout:${user.id}`;
+    const existingTicket = channels.find(channel =>
+        channel.type === ChannelType.GuildText &&
+        channel.topic === targetTopic
+    );
+
+    if (existingTicket) {
+        return { channel: existingTicket, isNew: false };
+    }
+
+    const [ownerRole, representativeRole] = await Promise.all([
+        guild.roles.fetch(OWNER_ROLE_ID).catch(() => null),
+        guild.roles.fetch(REPRESENTATIVE_ROLE_ID).catch(() => null),
+    ]);
+
+    const safeUsername = user.username
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 80) || 'user';
+
+    const overwrites = [
+        {
+            id: guild.roles.everyone.id,
+            deny: [PermissionFlagsBits.ViewChannel],
+        },
+        {
+            id: user.id,
+            allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+                PermissionFlagsBits.AttachFiles,
+                PermissionFlagsBits.EmbedLinks,
+            ],
+        },
+        {
+            id: client.user.id,
+            allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+                PermissionFlagsBits.ManageChannels,
+            ],
+        },
+    ];
+
+    if (ownerRole) {
+        overwrites.push({
+            id: ownerRole.id,
+            allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+            ],
+        });
+    }
+
+    if (representativeRole) {
+        overwrites.push({
+            id: representativeRole.id,
+            allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+            ],
+        });
+    }
+
+    const ticketChannel = await guild.channels.create({
+        name: `cashout-${safeUsername}`.slice(0, 100),
+        type: ChannelType.GuildText,
+        parent: category ? category.id : undefined,
+        topic: targetTopic,
+        permissionOverwrites: overwrites,
+    });
+
+    return { channel: ticketChannel, isNew: true, ownerRole, representativeRole };
+}
+
+async function handleCashoutButton(interaction) {
+    if (!interaction.inGuild()) {
+        return interaction.reply({ content: 'Cashout buttons can only be used inside a server.', ephemeral: true });
+    }
+
+    const [, action, rawRequestId] = interaction.customId.split(':');
+    const requestId = parseInt(rawRequestId, 10);
+
+    if (action === 'approve') {
+        await interaction.deferReply({ ephemeral: true });
+        const isStaff = hasSupportRole(interaction) || isAdmin(interaction);
+        if (!isStaff) {
+            return interaction.editReply({
+                content: '❌ Unauthorized: Only server Admins, Owners, or Representatives can approve cashout requests.',
+            });
+        }
+
+        const res = await approveCashoutRequest(db, {
+            requestId,
+            adminId: interaction.user.id,
+        });
+
+        if (!res.success) {
+            return interaction.editReply({ content: `❌ ${res.error}` });
+        }
+
+        const updatedRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('ticket:close')
+                .setLabel('Close Ticket')
+                .setStyle(ButtonStyle.Secondary)
+        );
+
+        if (interaction.message) {
+            const updatedEmbed = {
+                title: `💸 Cashout Request #${requestId} — Approved`,
+                fields: [
+                    { name: 'User', value: `<@${res.req.user_id}>`, inline: true },
+                    { name: 'Amount Deducted', value: `**${fmt(res.deductedAmount)} tokens**`, inline: true },
+                    { name: 'Remaining Balance', value: `${fmt(res.remainingBalance)} tokens`, inline: true },
+                    { name: 'Status', value: `🟢 **Completed & Deducted**`, inline: true },
+                    { name: 'Approved By', value: `<@${interaction.user.id}>`, inline: true },
+                    { name: 'Completed At', value: `<t:${Math.floor(res.completedAt / 1000)}:F>`, inline: true },
+                ],
+                color: 0x57F287,
+            };
+            await interaction.message.edit({ embeds: [updatedEmbed], components: [updatedRow] }).catch(() => {});
+        }
+
+        await interaction.channel?.send({
+            content: `✅ **Cashout Approved & Completed**\n**${fmt(res.deductedAmount)} tokens** deducted from <@${res.req.user_id}> by <@${interaction.user.id}>.\nRemaining user balance: **${fmt(res.remainingBalance)} tokens**.`,
+            allowedMentions: { users: [res.req.user_id] },
+        }).catch(() => {});
+
+        return interaction.editReply({ content: `✅ Cashout request #${requestId} successfully approved and completed.` });
+    }
+
+    if (action === 'reject') {
+        await interaction.deferReply({ ephemeral: true });
+        const isStaff = hasSupportRole(interaction) || isAdmin(interaction);
+        if (!isStaff) {
+            return interaction.editReply({
+                content: '❌ Unauthorized: Only server Admins, Owners, or Representatives can reject cashout requests.',
+            });
+        }
+
+        const res = await rejectCashoutRequest(db, {
+            requestId,
+            adminId: interaction.user.id,
+        });
+
+        if (!res.success) {
+            return interaction.editReply({ content: `❌ ${res.error}` });
+        }
+
+        const updatedRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('ticket:close')
+                .setLabel('Close Ticket')
+                .setStyle(ButtonStyle.Secondary)
+        );
+
+        if (interaction.message) {
+            const updatedEmbed = {
+                title: `💸 Cashout Request #${requestId} — Rejected`,
+                fields: [
+                    { name: 'User', value: `<@${res.req.user_id}>`, inline: true },
+                    { name: 'Requested Amount', value: `**${fmt(res.req.amount)} tokens**`, inline: true },
+                    { name: 'Status', value: `🔴 **Rejected**`, inline: true },
+                    { name: 'Rejected By', value: `<@${interaction.user.id}>`, inline: true },
+                    { name: 'Note', value: 'User balance was NOT deducted.', inline: false },
+                ],
+                color: 0xED4245,
+            };
+            await interaction.message.edit({ embeds: [updatedEmbed], components: [updatedRow] }).catch(() => {});
+        }
+
+        await interaction.channel?.send({
+            content: `❌ **Cashout Request Rejected**\nCashout request #${requestId} for **${fmt(res.req.amount)} tokens** was rejected by <@${interaction.user.id}>. User balance was not deducted.`,
+            allowedMentions: { users: [res.req.user_id] },
+        }).catch(() => {});
+
+        return interaction.editReply({ content: `❌ Cashout request #${requestId} rejected.` });
+    }
+}
+
+async function handleCashoutModal(interaction) {
+    await interaction.deferReply({ ephemeral: true });
+    const rawAmount = interaction.fields.getTextInputValue('cashout_amount')?.trim();
+    const amount = parseFloat(rawAmount);
+
+    if (isNaN(amount) || amount <= 0) {
+        return interaction.editReply({ content: '❌ Please enter a valid positive number of tokens.' });
+    }
+
+    if (amount > MAX_CASHOUT_AMOUNT) {
+        return interaction.editReply({ content: `❌ Maximum cashout limit is **${MAX_CASHOUT_AMOUNT.toLocaleString()} tokens** per request.` });
+    }
+
+    const user = await getOrCreateUser(interaction.user.id);
+    if (user.wallet_tokens < amount) {
+        return interaction.editReply({
+            content: `❌ Insufficient balance. You requested **${fmt(amount)} tokens**, but your available balance is only **${fmt(user.wallet_tokens)} tokens**.`,
+        });
+    }
+
+    const res = await createCashoutRequest(db, {
+        userId: interaction.user.id,
+        amount,
+        channelId: interaction.channelId,
+    });
+
+    if (!res.success) {
+        return interaction.editReply({ content: `❌ ${res.error}` });
+    }
+
+    const actionRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`cashout:approve:${res.requestId}`)
+            .setLabel('Approve & Complete')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId(`cashout:reject:${res.requestId}`)
+            .setLabel('Reject Cashout')
+            .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+            .setCustomId('ticket:close')
+            .setLabel('Close Ticket')
+            .setStyle(ButtonStyle.Secondary)
+    );
+
+    await interaction.channel?.send({
+        content: `${interaction.user} <@&${OWNER_ROLE_ID}> <@&${REPRESENTATIVE_ROLE_ID}>`,
+        allowedMentions: {
+            users: [interaction.user.id],
+            roles: [OWNER_ROLE_ID, REPRESENTATIVE_ROLE_ID],
+        },
+        embeds: [{
+            title: `💸 Cashout Request #${res.requestId}`,
+            description: `A new cashout request has been submitted for review.`,
+            fields: [
+                { name: 'User', value: `<@${interaction.user.id}> (${interaction.user.username})`, inline: true },
+                { name: 'Requested Amount', value: `**${fmt(amount)} tokens**`, inline: true },
+                { name: 'Available Balance', value: `${fmt(user.wallet_tokens)} tokens`, inline: true },
+                { name: 'Status', value: '🟡 **Pending Admin Review**', inline: true },
+                { name: 'Submission Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
+                { name: 'Note', value: 'Tokens remain in user wallet until an admin marks this request as completed.', inline: false },
+            ],
+            color: 0xFEE75C,
+        }],
+        components: [actionRow],
+    }).catch(() => {});
+
+    return interaction.editReply({ content: `✅ Cashout request #${res.requestId} for **${fmt(amount)} tokens** submitted for admin review.` });
+}
+
 async function generateBackup() {
     const users = await db.prepare('SELECT * FROM users').all();
     const companies = await db.prepare('SELECT * FROM companies').all();
@@ -542,8 +820,39 @@ client.once(Events.ClientReady, async () => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
+        if (interaction.customId === 'cashout:open_modal') {
+            const modal = new ModalBuilder()
+                .setCustomId('cashout:submit_modal')
+                .setTitle('Request Cashout');
+
+            const amountInput = new TextInputBuilder()
+                .setCustomId('cashout_amount')
+                .setLabel('Amount to Cash Out (Max: 8,000)')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('e.g. 500')
+                .setRequired(true);
+
+            const row = new ActionRowBuilder().addComponents(amountInput);
+            modal.addComponents(row);
+            return interaction.showModal(modal);
+        }
+
+        if (interaction.customId.startsWith('cashout:')) {
+            await handleCashoutButton(interaction);
+            return;
+        }
+
         if (interaction.customId.startsWith('ticket:')) {
             await handleTicketButton(interaction);
+            return;
+        }
+        return;
+    }
+
+    if (interaction.isModalSubmit()) {
+        if (interaction.customId === 'cashout:submit_modal') {
+            await handleCashoutModal(interaction);
+            return;
         }
         return;
     }
@@ -1219,6 +1528,109 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     color: 0x5865F2,
                 }],
             });
+        }
+
+        // ── /cashout ─────────────────────────────────────────────────────────
+        if (commandName === 'cashout') {
+            if (!interaction.inGuild()) {
+                return interaction.editReply({ content: 'The /cashout command can only be used inside a server.', ephemeral: true });
+            }
+
+            const amount = interaction.options.getNumber('amount');
+            const user = await getOrCreateUser(interaction.user.id);
+
+            if (amount !== null) {
+                const validation = validateCashoutAmount(amount, user.wallet_tokens);
+                if (!validation.valid) {
+                    return interaction.editReply({ content: `❌ ${validation.reason}`, ephemeral: true });
+                }
+            }
+
+            const ticketResult = await getOrCreateCashoutTicketChannel(interaction.guild, interaction.user);
+            const channel = ticketResult.channel;
+
+            if (amount !== null) {
+                const reqResult = await createCashoutRequest(db, {
+                    userId: interaction.user.id,
+                    amount,
+                    channelId: channel.id,
+                });
+
+                if (!reqResult.success) {
+                    return interaction.editReply({ content: `❌ ${reqResult.error}`, ephemeral: true });
+                }
+
+                const actionRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`cashout:approve:${reqResult.requestId}`)
+                        .setLabel('Approve & Complete')
+                        .setStyle(ButtonStyle.Success),
+                    new ButtonBuilder()
+                        .setCustomId(`cashout:reject:${reqResult.requestId}`)
+                        .setLabel('Reject Cashout')
+                        .setStyle(ButtonStyle.Danger),
+                    new ButtonBuilder()
+                        .setCustomId('ticket:close')
+                        .setLabel('Close Ticket')
+                        .setStyle(ButtonStyle.Secondary)
+                );
+
+                await channel.send({
+                    content: `${interaction.user} <@&${OWNER_ROLE_ID}> <@&${REPRESENTATIVE_ROLE_ID}>`,
+                    allowedMentions: {
+                        users: [interaction.user.id],
+                        roles: [OWNER_ROLE_ID, REPRESENTATIVE_ROLE_ID],
+                    },
+                    embeds: [{
+                        title: `💸 Cashout Request #${reqResult.requestId}`,
+                        description: `A new cashout request has been submitted for review.`,
+                        fields: [
+                            { name: 'User', value: `<@${interaction.user.id}> (${interaction.user.username})`, inline: true },
+                            { name: 'Requested Amount', value: `**${fmt(amount)} tokens**`, inline: true },
+                            { name: 'Available Balance', value: `${fmt(user.wallet_tokens)} tokens`, inline: true },
+                            { name: 'Status', value: '🟡 **Pending Admin Review**', inline: true },
+                            { name: 'Submission Time', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
+                            { name: 'Note', value: 'Tokens remain in user wallet until an admin marks this request as completed.', inline: false },
+                        ],
+                        color: 0xFEE75C,
+                    }],
+                    components: [actionRow],
+                }).catch(() => {});
+
+                return interaction.editReply({
+                    content: `✅ Your cashout request #${reqResult.requestId} for **${fmt(amount)} tokens** has been submitted: ${channel}`,
+                });
+            } else {
+                const promptRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('cashout:open_modal')
+                        .setLabel('Enter Cashout Amount')
+                        .setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder()
+                        .setCustomId('ticket:close')
+                        .setLabel('Close Ticket')
+                        .setStyle(ButtonStyle.Secondary)
+                );
+
+                await channel.send({
+                    content: `${interaction.user}`,
+                    allowedMentions: { users: [interaction.user.id] },
+                    embeds: [{
+                        title: '💸 Token Cashout Request',
+                        description: `Welcome to the cashout desk. You can request up to **${MAX_CASHOUT_AMOUNT.toLocaleString()} tokens** per cashout request.\n\nClick the button below to specify your cashout amount.`,
+                        fields: [
+                            { name: 'Your Available Balance', value: `${fmt(user.wallet_tokens)} tokens`, inline: true },
+                            { name: 'Max Limit Per Request', value: `${MAX_CASHOUT_AMOUNT.toLocaleString()} tokens`, inline: true },
+                        ],
+                        color: 0x5865F2,
+                    }],
+                    components: [promptRow],
+                }).catch(() => {});
+
+                return interaction.editReply({
+                    content: `Your cashout ticket has been opened: ${channel}. Click **Enter Cashout Amount** inside the ticket to submit your request.`,
+                });
+            }
         }
 
         // ── /admin-addcompany ─────────────────────────────────────────────────

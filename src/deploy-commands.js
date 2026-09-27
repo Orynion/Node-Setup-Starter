@@ -100,6 +100,11 @@ const commands = [
         .addIntegerOption(o => o.setName('limit').setDescription('Number of transactions to display (default: 10, max: 25)').setRequired(false).setMinValue(1).setMaxValue(25)),
 
     new SlashCommandBuilder()
+        .setName('cashout')
+        .setDescription('Request a cashout for your LAX wallet tokens (Max: 8,000 tokens)')
+        .addNumberOption(o => o.setName('amount').setDescription('Amount of tokens to cash out (Max: 8,000)').setRequired(false).setMinValue(0.01).setMaxValue(8000)),
+
+    new SlashCommandBuilder()
         .setName('earnings')
         .setDescription('View your company earnings this week and all time'),
 
