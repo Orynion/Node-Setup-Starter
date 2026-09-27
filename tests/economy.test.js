@@ -33,7 +33,7 @@ test('Slash command definitions verification', () => {
     const expected = [
         'balance', 'leaderboard', 'stock-buy', 'stock-sell', 'sell-cancel',
         'stock-info', 'stock-list', 'chart', 'provide-shares', 'history',
-        'cashout', 'sell', 'add-user', 'treasury', 'admin-instant-sell',
+        'cashout', 'sell', 'add-user', 'treasury', 'admin-instant-sell', 'ask',
         'earnings', 'today-exchange-stat', 'exchange-balance', 'admin-add-money',
         'admin-remove-money', 'admin-addcompany', 'admin-removecompany',
         'admin-editcompany', 'economy-backup', 'economy-restore', 'setup-tickets', 'server-embed'

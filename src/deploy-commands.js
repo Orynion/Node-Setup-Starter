@@ -134,6 +134,11 @@ const commands = [
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
+        .setName('ask')
+        .setDescription('Ask LAX AI a question about the Los Angeles Exchange')
+        .addStringOption(o => o.setName('question').setDescription('Your question for LAX AI').setRequired(true).setMaxLength(1000)),
+
+    new SlashCommandBuilder()
         .setName('earnings')
         .setDescription('View your company earnings this week and all time'),
 

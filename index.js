@@ -28,6 +28,7 @@ const {
 } = require('./src/cashout.js');
 const treasury = require('./src/treasury.js');
 const ticketUtils = require('./src/ticket-utils.js');
+const { askLaxAi } = require('./src/ai.js');
 
 const deflate = promisify(zlib.deflate);
 const inflate = promisify(zlib.inflate);
@@ -2273,6 +2274,50 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     content: `✅ Successfully withdrew **${fmt(res.withdrawnAmount)} tokens** of realized profit to your wallet. Remaining withdrawable profit: **${fmt(res.remainingWithdrawable)} tokens**.`,
                 });
             }
+        }
+
+        // ── /ask (LAX AI Conversational Assistant) ───────────────────────────
+        if (commandName === 'ask') {
+            const question = interaction.options.getString('question');
+
+            const aiResult = await askLaxAi({
+                question,
+                userId: interaction.user.id,
+            });
+
+            if (!aiResult.success) {
+                return interaction.editReply({
+                    embeds: [{
+                        title: '🤖 LAX AI Assistant',
+                        description: `❌ ${aiResult.error}`,
+                        color: 0xED4245,
+                    }],
+                });
+            }
+
+            const safeQuestion = question.length > 250 ? `${question.slice(0, 247)}...` : question;
+            const primaryChunk = aiResult.chunks[0];
+
+            await interaction.editReply({
+                embeds: [{
+                    title: '🤖 LAX AI Assistant',
+                    description: `**Q: ${safeQuestion}**\n\n${primaryChunk}`,
+                    footer: { text: 'Los Angeles Exchange • Conversational Assistant V1' },
+                    color: 0x5865F2,
+                }],
+            });
+
+            // If the response was long and split into multiple safe chunks, send the remainder as followups
+            for (let i = 1; i < aiResult.chunks.length; i++) {
+                await interaction.followUp({
+                    embeds: [{
+                        description: aiResult.chunks[i],
+                        footer: { text: `Los Angeles Exchange • Response Part ${i + 1}` },
+                        color: 0x5865F2,
+                    }],
+                }).catch(() => {});
+            }
+            return;
         }
 
     } catch (err) {
