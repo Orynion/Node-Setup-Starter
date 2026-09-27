@@ -93,6 +93,12 @@ const commands = [
         .addIntegerOption(o => o.setName('amount').setDescription('Number of shares to provide').setRequired(true).setMinValue(1)),
 
     new SlashCommandBuilder()
+        .setName('history')
+        .setDescription('View your recent buy/sell transaction history before cashing out')
+        .addStringOption(o => o.setName('ticker').setDescription('Filter by company ticker symbol').setRequired(false))
+        .addIntegerOption(o => o.setName('limit').setDescription('Number of transactions to display (default: 10, max: 25)').setRequired(false).setMinValue(1).setMaxValue(25)),
+
+    new SlashCommandBuilder()
         .setName('earnings')
         .setDescription('View your company earnings this week and all time'),
 
@@ -102,8 +108,7 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('exchange-balance')
-        .setDescription('Admin: View exchange fee balances')
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+        .setDescription('View exchange fee balances'),
 
     new SlashCommandBuilder()
         .setName('economy-backup')

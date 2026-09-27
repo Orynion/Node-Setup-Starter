@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "node index.js",
     "build": "echo 'Build complete'",
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test tests/*.test.js"
   },
   "engines": {
     "node": ">=20"

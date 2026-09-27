@@ -65,6 +65,29 @@ const client = new Client({
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+async function ensureInvestorRole(guild, userId) {
+    if (!guild || !userId) return;
+    try {
+        const configuredRoleId = (process.env.INVESTOR_ROLE_ID || '').trim();
+        let targetRole = null;
+        if (configuredRoleId) {
+            targetRole = guild.roles.cache.get(configuredRoleId) || await guild.roles.fetch(configuredRoleId).catch(() => null);
+        }
+        if (!targetRole) {
+            targetRole = guild.roles.cache.find(r => r.name.toLowerCase() === 'investor');
+        }
+        if (targetRole) {
+            const member = await guild.members.fetch(userId).catch(() => null);
+            if (member && !member.roles.cache.has(targetRole.id)) {
+                await member.roles.add(targetRole.id);
+                console.log(`[Investor Role] Assigned role "${targetRole.name}" (${targetRole.id}) to user ${userId} (${member.user.username}) in guild "${guild.name}".`);
+            }
+        }
+    } catch (err) {
+        console.warn(`[Investor Role] Could not assign role to user ${userId}:`, err.message);
+    }
+}
+
 async function getOrCreateUser(userId) {
     let user = await db.prepare('SELECT * FROM users WHERE discord_id = ?').get(userId);
     if (!user) {
@@ -727,6 +750,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             console.log(`Completed ${completedTrades} ${ticker} trade(s); exchange fee: ${fmt(totalFees)} tokens.`);
 
+            if (interaction.guild) {
+                await ensureInvestorRole(interaction.guild, interaction.user.id);
+            }
+
             const sharesFromOrders = amount - sharesFromBot;
             return interaction.editReply({
                 embeds: [{
@@ -1065,6 +1092,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const newCirculation = company.shares_in_circulation + amount;
             const emoji = company.emoji ?? '🏢';
 
+            if (interaction.guild) {
+                await ensureInvestorRole(interaction.guild, targetUser.id);
+            }
+
             return interaction.editReply({
                 embeds: [{
                     title: `📦 ${emoji} Shares Provided: ${company.company_name} (${ticker})`,
@@ -1079,6 +1110,106 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     ],
                     color: 0x57F287,
                 }]
+            });
+        }
+
+        // ── /history ─────────────────────────────────────────────────────────
+        if (commandName === 'history') {
+            const requestedTicker = interaction.options.getString('ticker')?.toUpperCase();
+            const limit = interaction.options.getInteger('limit') || 10;
+            const userId = interaction.user.id;
+
+            let tradesQuery;
+            let params;
+            if (requestedTicker) {
+                tradesQuery = `SELECT * FROM trade_ledger 
+                               WHERE (buyer_id = ? OR seller_id = ?) AND ticker = ? 
+                               ORDER BY timestamp DESC LIMIT ?`;
+                params = [userId, userId, requestedTicker, limit];
+            } else {
+                tradesQuery = `SELECT * FROM trade_ledger 
+                               WHERE (buyer_id = ? OR seller_id = ?) 
+                               ORDER BY timestamp DESC LIMIT ?`;
+                params = [userId, userId, limit];
+            }
+
+            const [trades, activeOrders, userRecord] = await Promise.all([
+                db.prepare(tradesQuery).all(...params),
+                db.prepare('SELECT * FROM sell_orders WHERE seller_id = ? ORDER BY timestamp DESC LIMIT 5').all(userId),
+                getOrCreateUser(userId),
+            ]);
+
+            const portfolio = getPortfolio(userRecord);
+
+            if (trades.length === 0 && activeOrders.length === 0) {
+                return interaction.editReply({
+                    embeds: [{
+                        title: `📜 Transaction History: ${interaction.user.username}`,
+                        description: requestedTicker 
+                            ? `No recorded transactions found for **${requestedTicker}**.` 
+                            : 'No recorded stock transactions found for your account yet.',
+                        color: 0x5865F2,
+                    }],
+                });
+            }
+
+            const historyLines = trades.map(t => {
+                const dateStr = `<t:${Math.floor(t.timestamp / 1000)}:d> <t:${Math.floor(t.timestamp / 1000)}:t>`;
+                const relativeTime = `<t:${Math.floor(t.timestamp / 1000)}:R>`;
+                const isBuyer = t.buyer_id === userId;
+                const isSeller = t.seller_id === userId;
+
+                if (isBuyer && !isSeller) {
+                    const costStr = t.trade_value > 0 ? `${fmt(t.trade_value)} tokens` : 'Provided (0 tokens)';
+                    const feeStr = t.fee_amount > 0 ? ` (fee: ${fmt(t.fee_amount)})` : '';
+                    return `🟢 **BUY / RECEIVED** • \`${t.ticker}\`\n` +
+                           `└ **+${t.shares.toLocaleString()}** shares for **${costStr}**${feeStr} — ${relativeTime} (${dateStr})`;
+                } else if (isSeller && !isBuyer) {
+                    const netEarnings = t.trade_value - t.fee_amount;
+                    const earningsStr = `${fmt(netEarnings)} tokens`;
+                    const feeStr = t.fee_amount > 0 ? ` (fee: ${fmt(t.fee_amount)})` : '';
+                    return `🔴 **SOLD** • \`${t.ticker}\`\n` +
+                           `└ **-${t.shares.toLocaleString()}** shares for **${earningsStr}**${feeStr} — ${relativeTime} (${dateStr})`;
+                } else {
+                    return `🔄 **TRANSFER** • \`${t.ticker}\`\n` +
+                           `└ **${t.shares.toLocaleString()}** shares — ${relativeTime} (${dateStr})`;
+                }
+            });
+
+            const fields = [];
+
+            if (activeOrders.length > 0 && (!requestedTicker || activeOrders.some(o => o.ticker === requestedTicker))) {
+                const orderLines = activeOrders
+                    .filter(o => !requestedTicker || o.ticker === requestedTicker)
+                    .map(o => `⏳ \`${o.ticker}\`: **${o.shares.toLocaleString()}** shares listed at **${fmt(o.list_price)}** tokens/share (<t:${Math.floor(o.timestamp / 1000)}:R>)`);
+                if (orderLines.length > 0) {
+                    fields.push({
+                        name: '📋 Active Sell Orders (Pending)',
+                        value: orderLines.join('\n'),
+                        inline: false,
+                    });
+                }
+            }
+
+            fields.push({
+                name: `Recent Transactions (${trades.length}${requestedTicker ? ` for ${requestedTicker}` : ''})`,
+                value: historyLines.length > 0 ? historyLines.join('\n\n') : 'No completed trades for this filter.',
+                inline: false,
+            });
+
+            const portfolioHoldings = Object.entries(portfolio).filter(([_, count]) => count > 0);
+            const holdingSummary = portfolioHoldings.length > 0 
+                ? portfolioHoldings.map(([ticker, count]) => `\`${ticker}\`: ${count.toLocaleString()}`).join(' • ')
+                : 'None';
+
+            return interaction.editReply({
+                embeds: [{
+                    title: `📜 Transaction History: ${interaction.user.username}`,
+                    description: `Wallet Balance: **${fmt(userRecord.wallet_tokens)} tokens**\nCurrent Portfolio: ${holdingSummary}`,
+                    fields,
+                    footer: { text: 'IRP Exchange Ledger • Use /stock-sell to list shares' },
+                    color: 0x5865F2,
+                }],
             });
         }
 
@@ -1330,8 +1461,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /exchange-balance ───────────────────────────────────────────────────
         if (commandName === 'exchange-balance') {
-            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
-
             const todayStart = startOfTodayUtc();
             const [today, allTime] = await Promise.all([
                 db.prepare('SELECT COALESCE(SUM(fee_amount), 0) AS fees FROM trade_ledger WHERE timestamp >= ?').get(todayStart),
@@ -1340,10 +1469,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             return interaction.editReply({
                 embeds: [{
-                    title: 'IRPExchange Balance',
+                    title: '🏛️ IRP Exchange Fee Balances',
+                    description: 'Public balance of trading fees collected by the exchange.',
                     fields: [
                         { name: "Today's Fees Earned", value: `${fmt(today.fees)} tokens`, inline: true },
                         { name: 'Total Fees Earned', value: `${fmt(allTime.fees)} tokens`, inline: true },
+                        { name: 'Exchange Fee Rate', value: `${(EXCHANGE_FEE_RATE * 100).toFixed(1)}% per trade`, inline: true },
                     ],
                     color: 0x57F287,
                 }],
