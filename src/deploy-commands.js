@@ -106,6 +106,34 @@ const commands = [
         .addNumberOption(o => o.setName('amount').setDescription('Amount of tokens to cash out (Max: 8,000)').setRequired(false).setMinValue(0.01).setMaxValue(8000)),
 
     new SlashCommandBuilder()
+        .setName('sell')
+        .setDescription('Instant sell your shares directly to the LAX Treasury')
+        .addStringOption(o => o.setName('ticker').setDescription('Company ticker symbol').setRequired(true))
+        .addIntegerOption(o => o.setName('amount').setDescription('Number of shares to sell to Treasury').setRequired(true).setMinValue(1)),
+
+    new SlashCommandBuilder()
+        .setName('add-user')
+        .setDescription('Staff: Add a user to this private ticket channel')
+        .addUserOption(o => o.setName('user').setDescription('Target user to add to this ticket').setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('treasury')
+        .setDescription('View LAX Treasury inventory, reserves, and liquidity accounting'),
+
+    new SlashCommandBuilder()
+        .setName('admin-instant-sell')
+        .setDescription('Admin: Manage LAX Instant Sell settings, debt floor, and realized profit')
+        .addStringOption(o => o.setName('action').setDescription('Action to perform').setRequired(true)
+            .addChoices(
+                { name: 'status', value: 'status' },
+                { name: 'toggle-killswitch', value: 'toggle-killswitch' },
+                { name: 'set-debt-floor', value: 'set-debt-floor' },
+                { name: 'withdraw-profit', value: 'withdraw-profit' }
+            ))
+        .addNumberOption(o => o.setName('value').setDescription('Numeric value for debt floor or profit withdrawal').setRequired(false))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+    new SlashCommandBuilder()
         .setName('earnings')
         .setDescription('View your company earnings this week and all time'),
 

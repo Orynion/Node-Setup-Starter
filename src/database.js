@@ -102,6 +102,56 @@ const schema = `
         admin_note TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS lax_account (
+        id INTEGER PRIMARY KEY,
+        balance REAL NOT NULL DEFAULT 0,
+        debt_floor REAL NOT NULL DEFAULT -10000,
+        kill_switch_enabled INTEGER NOT NULL DEFAULT 0,
+        realized_pnl REAL NOT NULL DEFAULT 0,
+        total_withdrawn REAL NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS lax_treasury (
+        ticker TEXT PRIMARY KEY,
+        shares INTEGER NOT NULL DEFAULT 0,
+        total_acquisition_cost REAL NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS lax_treasury_lots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        shares INTEGER NOT NULL,
+        original_shares INTEGER NOT NULL,
+        unit_cost REAL NOT NULL,
+        total_cost REAL NOT NULL,
+        timestamp INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active'
+    );
+
+    CREATE TABLE IF NOT EXISTS lax_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_id TEXT NOT NULL UNIQUE,
+        transaction_type TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        ticker TEXT,
+        shares INTEGER NOT NULL DEFAULT 0,
+        price_per_share REAL NOT NULL DEFAULT 0,
+        total_value REAL NOT NULL DEFAULT 0,
+        acquisition_cost REAL DEFAULT 0,
+        realized_pnl REAL DEFAULT 0,
+        resulting_lax_balance REAL NOT NULL,
+        resulting_treasury_shares INTEGER NOT NULL DEFAULT 0,
+        timestamp INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS user_cooldowns (
+        user_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        last_used_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, action)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_trade_ledger_timestamp
         ON trade_ledger (timestamp);
 
@@ -110,6 +160,15 @@ const schema = `
 
     CREATE INDEX IF NOT EXISTS idx_cashout_requests_status
         ON cashout_requests (status);
+
+    CREATE INDEX IF NOT EXISTS idx_lax_transactions_timestamp
+        ON lax_transactions (timestamp);
+
+    CREATE INDEX IF NOT EXISTS idx_lax_transactions_user
+        ON lax_transactions (user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_lax_treasury_lots_ticker
+        ON lax_treasury_lots (ticker, status);
 `;
 
 function toArgs(params) {
@@ -170,6 +229,9 @@ class TursoDatabase {
             } catch (_) {}
             try {
                 await client.execute("ALTER TABLE companies ADD COLUMN emoji TEXT NOT NULL DEFAULT '🏢'");
+            } catch (_) {}
+            try {
+                await client.execute("INSERT OR IGNORE INTO lax_account (id, balance, debt_floor, kill_switch_enabled, realized_pnl, total_withdrawn) VALUES (1, 0, -10000, 0, 0, 0)");
             } catch (_) {}
             console.log(`[Database] Database ready and verified (${this.isRemote ? 'Turso Cloud' : 'Local SQLite'}).`);
         } catch (err) {

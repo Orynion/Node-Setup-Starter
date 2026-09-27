@@ -26,6 +26,8 @@ const {
     approveCashoutRequest,
     rejectCashoutRequest,
 } = require('./src/cashout.js');
+const treasury = require('./src/treasury.js');
+const ticketUtils = require('./src/ticket-utils.js');
 
 const deflate = promisify(zlib.deflate);
 const inflate = promisify(zlib.inflate);
@@ -637,7 +639,26 @@ async function generateBackup() {
     const priceHistory = await db.prepare('SELECT * FROM price_history ORDER BY timestamp ASC').all();
     const sellOrders = await db.prepare('SELECT * FROM sell_orders').all();
     const tradeLedger = await db.prepare('SELECT * FROM trade_ledger ORDER BY timestamp ASC, id ASC').all();
-    const payload = { v: 1, ts: Date.now(), users, companies, priceHistory, sellOrders, tradeLedger };
+    const laxAccount = await db.prepare('SELECT * FROM lax_account').all();
+    const laxTreasury = await db.prepare('SELECT * FROM lax_treasury').all();
+    const laxTreasuryLots = await db.prepare('SELECT * FROM lax_treasury_lots').all();
+    const laxTransactions = await db.prepare('SELECT * FROM lax_transactions ORDER BY timestamp ASC, id ASC').all();
+    const userCooldowns = await db.prepare('SELECT * FROM user_cooldowns').all();
+
+    const payload = {
+        v: 2,
+        ts: Date.now(),
+        users,
+        companies,
+        priceHistory,
+        sellOrders,
+        tradeLedger,
+        laxAccount,
+        laxTreasury,
+        laxTreasuryLots,
+        laxTransactions,
+        userCooldowns,
+    };
     const compressed = await deflate(Buffer.from(JSON.stringify(payload)));
     return compressed.toString('base64');
 }
@@ -672,6 +693,46 @@ async function restoreBackup(code) {
         for (const t of data.tradeLedger ?? [])
             await tx.prepare('INSERT INTO trade_ledger (id, ticker, buyer_id, seller_id, shares, trade_value, fee_amount, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
                 .run(t.id, t.ticker, t.buyer_id, t.seller_id, t.shares, t.trade_value, t.fee_amount, t.timestamp);
+
+        if (data.laxAccount?.length) {
+            await tx.prepare('DELETE FROM lax_account').run();
+            for (const a of data.laxAccount) {
+                await tx.prepare('INSERT INTO lax_account (id, balance, debt_floor, kill_switch_enabled, realized_pnl, total_withdrawn) VALUES (?, ?, ?, ?, ?, ?)')
+                    .run(a.id, a.balance, a.debt_floor, a.kill_switch_enabled, a.realized_pnl, a.total_withdrawn);
+            }
+        }
+
+        if (data.laxTreasury?.length) {
+            await tx.prepare('DELETE FROM lax_treasury').run();
+            for (const tr of data.laxTreasury) {
+                await tx.prepare('INSERT INTO lax_treasury (ticker, shares, total_acquisition_cost, updated_at) VALUES (?, ?, ?, ?)')
+                    .run(tr.ticker, tr.shares, tr.total_acquisition_cost, tr.updated_at);
+            }
+        }
+
+        if (data.laxTreasuryLots?.length) {
+            await tx.prepare('DELETE FROM lax_treasury_lots').run();
+            for (const l of data.laxTreasuryLots) {
+                await tx.prepare('INSERT INTO lax_treasury_lots (id, ticker, shares, original_shares, unit_cost, total_cost, timestamp, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+                    .run(l.id, l.ticker, l.shares, l.original_shares, l.unit_cost, l.total_cost, l.timestamp, l.status);
+            }
+        }
+
+        if (data.laxTransactions?.length) {
+            await tx.prepare('DELETE FROM lax_transactions').run();
+            for (const x of data.laxTransactions) {
+                await tx.prepare('INSERT INTO lax_transactions (id, transaction_id, transaction_type, user_id, ticker, shares, price_per_share, total_value, acquisition_cost, realized_pnl, resulting_lax_balance, resulting_treasury_shares, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+                    .run(x.id, x.transaction_id, x.transaction_type, x.user_id, x.ticker, x.shares, x.price_per_share, x.total_value, x.acquisition_cost, x.realized_pnl, x.resulting_lax_balance, x.resulting_treasury_shares, x.timestamp);
+            }
+        }
+
+        if (data.userCooldowns?.length) {
+            await tx.prepare('DELETE FROM user_cooldowns').run();
+            for (const c of data.userCooldowns) {
+                await tx.prepare('INSERT INTO user_cooldowns (user_id, action, last_used_at) VALUES (?, ?, ?)')
+                    .run(c.user_id, c.action, c.last_used_at);
+            }
+        }
     });
 
     return data;
@@ -847,6 +908,69 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await handleTicketButton(interaction);
             return;
         }
+
+        if (interaction.customId.startsWith('sell:')) {
+            const parts = interaction.customId.split(':');
+            const action = parts[1];
+            const targetUserId = parts[2];
+
+            if (interaction.user.id !== targetUserId) {
+                return interaction.reply({
+                    content: '❌ Only the user who ran the /sell command can interact with these confirmation buttons.',
+                    flags: MessageFlags.Ephemeral,
+                });
+            }
+
+            if (action === 'cancel') {
+                return interaction.update({
+                    content: '❌ Instant sell transaction cancelled. No shares or cooldowns were consumed.',
+                    embeds: [],
+                    components: [],
+                });
+            }
+
+            if (action === 'confirm') {
+                const ticker = parts[3];
+                const amount = parseInt(parts[4], 10);
+
+                await interaction.deferUpdate();
+
+                const result = await treasury.executeInstantSell(db, {
+                    userId: interaction.user.id,
+                    ticker,
+                    shares: amount,
+                });
+
+                if (!result.success) {
+                    return interaction.editReply({
+                        content: `❌ ${result.error}`,
+                        embeds: [],
+                        components: [],
+                    });
+                }
+
+                return interaction.editReply({
+                    content: null,
+                    embeds: [{
+                        title: `⚡ Instant Sell Completed — ${result.ticker}`,
+                        description: `Successfully sold **${result.sharesSold.toLocaleString()}** shares directly to LAX Treasury.`,
+                        fields: [
+                            { name: 'Company', value: `**${result.companyName}** (\`${result.ticker}\`)`, inline: true },
+                            { name: 'Shares Sold', value: `${result.sharesSold.toLocaleString()}`, inline: true },
+                            { name: 'Buyback Price', value: `${fmt(result.buybackPrice)} tokens/share`, inline: true },
+                            { name: 'Tokens Received', value: `**+${fmt(result.totalTokensReceived)} tokens**`, inline: true },
+                            { name: 'New Wallet Balance', value: `${fmt(result.newUserBalance)} tokens`, inline: true },
+                            { name: 'New Market Price', value: `${fmt(result.newMarketPrice)} tokens`, inline: true },
+                            { name: 'Transaction ID', value: `\`${result.txId}\``, inline: true },
+                            { name: 'Next Instant Sell Available', value: `<t:${Math.floor(result.cooldownExpiresAt / 1000)}:R>`, inline: true },
+                        ],
+                        color: 0x57F287,
+                    }],
+                    components: [],
+                });
+            }
+            return;
+        }
         return;
     }
 
@@ -976,9 +1100,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 'SELECT * FROM sell_orders WHERE ticker = ? AND seller_id != ? ORDER BY list_price ASC, timestamp ASC'
             ).all(ticker, interaction.user.id);
 
+            const treasuryItem = await db.prepare('SELECT * FROM lax_treasury WHERE ticker = ?').get(ticker);
+            const availableTreasuryShares = treasuryItem ? treasuryItem.shares : 0;
+
             let remaining = amount;
             let totalCost = 0;
             const ordersToFill = [];
+            let sharesFromTreasury = 0;
             let sharesFromBot = 0;
 
             for (const order of sellOrders) {
@@ -989,9 +1117,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 remaining -= fill;
             }
 
+            if (remaining > 0 && availableTreasuryShares > 0) {
+                sharesFromTreasury = Math.min(remaining, availableTreasuryShares);
+                totalCost += sharesFromTreasury * company.current_price;
+                remaining -= sharesFromTreasury;
+            }
+
             if (remaining > 0) {
                 if (company.bot_share_reserve < remaining)
-                    return interaction.editReply({ content: `Not enough shares available. Bot reserve: **${company.bot_share_reserve}**, sell orders available: **${amount - remaining}**.`, flags: MessageFlags.Ephemeral });
+                    return interaction.editReply({
+                        content: `Not enough shares available. Bot reserve: **${company.bot_share_reserve}**, Treasury: **${availableTreasuryShares}**, sell orders available: **${amount - remaining - sharesFromTreasury}**.`,
+                        flags: MessageFlags.Ephemeral,
+                    });
                 totalCost += remaining * company.current_price;
                 sharesFromBot = remaining;
             }
@@ -1034,6 +1171,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     ).run(ticker, interaction.user.id, order.seller_id, fill, tradeValue, feeAmount, tradeTimestamp);
                 }
 
+                // Complete trades from LAX Treasury inventory
+                if (sharesFromTreasury > 0) {
+                    const trRes = await treasury.fulfillFromTreasury(tx, {
+                        ticker,
+                        requestedShares: sharesFromTreasury,
+                        currentPrice: company.current_price,
+                        tradeTimestamp,
+                        buyerId: interaction.user.id,
+                    });
+                    totalFees += trRes.feeAmount;
+                    completedTrades += 1;
+                }
+
                 // Complete any remaining shares against the bot reserve. The company
                 // owner receives the net value, while the exchange owner receives the fee.
                 if (sharesFromBot > 0) {
@@ -1042,26 +1192,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     const ownerEarnings = botTradeValue - feeAmount;
                     totalFees += feeAmount;
                     completedTrades += 1;
-                    newPrice = adjustPrice(company.current_price, sharesFromBot, 'up');
 
                     await tx.prepare(`UPDATE companies SET
                         bot_share_reserve = bot_share_reserve - ?,
                         shares_in_circulation = shares_in_circulation + ?,
-                        current_price = ?,
                         pending_cashout_tokens = pending_cashout_tokens + ?,
                         all_time_earnings = all_time_earnings + ?
                         WHERE ticker = ?`
-                    ).run(sharesFromBot, sharesFromBot, newPrice, ownerEarnings, ownerEarnings, ticker);
+                    ).run(sharesFromBot, sharesFromBot, ownerEarnings, ownerEarnings, ticker);
                     await tx.prepare('INSERT OR IGNORE INTO users (discord_id, wallet_tokens, portfolio) VALUES (?, 0, ?)')
                         .run(company.owner_id, '{}');
                     await tx.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?')
                         .run(ownerEarnings, company.owner_id);
-                    await tx.prepare('INSERT INTO price_history (ticker, price, timestamp) VALUES (?, ?, ?)')
-                        .run(ticker, newPrice, tradeTimestamp);
                     await tx.prepare(`INSERT INTO trade_ledger
                         (ticker, buyer_id, seller_id, shares, trade_value, fee_amount, timestamp)
                         VALUES (?, ?, ?, ?, ?, ?, ?)`
                     ).run(ticker, interaction.user.id, company.owner_id, sharesFromBot, botTradeValue, feeAmount, tradeTimestamp);
+                }
+
+                // Adjust price up for all shares bought from Treasury & Bot reserve
+                const totalMarketShares = sharesFromTreasury + sharesFromBot;
+                if (totalMarketShares > 0) {
+                    newPrice = adjustPrice(company.current_price, totalMarketShares, 'up');
+                    await tx.prepare('UPDATE companies SET current_price = ? WHERE ticker = ?').run(newPrice, ticker);
+                    await tx.prepare('INSERT INTO price_history (ticker, price, timestamp) VALUES (?, ?, ?)')
+                        .run(ticker, newPrice, tradeTimestamp);
                 }
 
                 await tx.prepare('UPDATE users SET wallet_tokens = wallet_tokens + ? WHERE discord_id = ?')
@@ -1079,7 +1234,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 await ensureInvestorRole(interaction.guild, interaction.user.id);
             }
 
-            const sharesFromOrders = amount - sharesFromBot;
+            const sharesFromOrders = amount - sharesFromTreasury - sharesFromBot;
             return interaction.editReply({
                 embeds: [{
                     title: `📈 Bought ${amount} shares of ${ticker}`,
@@ -1088,6 +1243,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         { name: 'Exchange Fee (1%)', value: `${fmt(totalFees)} tokens`, inline: true },
                         { name: 'New Price', value: `${fmt(newPrice)} tokens`, inline: true },
                         { name: 'From Sellers', value: `${sharesFromOrders} shares`, inline: true },
+                        { name: 'From Treasury', value: `${sharesFromTreasury} shares`, inline: true },
                         { name: 'From Bot Reserve', value: `${sharesFromBot} shares`, inline: true },
                         { name: 'Completed Trades', value: `${completedTrades}`, inline: true },
                     ],
@@ -1918,6 +2074,205 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     color: 0x57F287,
                 }],
             });
+        }
+
+        // ── /sell (Instant Sell to LAX Treasury) ──────────────────────────────
+        if (commandName === 'sell') {
+            const ticker = interaction.options.getString('ticker').toUpperCase();
+            const amount = interaction.options.getInteger('amount');
+
+            const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
+            if (!company) {
+                return interaction.editReply({ content: `Company **${ticker}** not found.`, flags: MessageFlags.Ephemeral });
+            }
+
+            const [user, laxAccount, cooldown] = await Promise.all([
+                getOrCreateUser(interaction.user.id),
+                treasury.getLaxAccount(db),
+                treasury.getCooldown(db, interaction.user.id),
+            ]);
+
+            const validation = treasury.validateInstantSell({
+                user,
+                company,
+                shares: amount,
+                laxAccount,
+                cooldown,
+            });
+
+            if (!validation.valid) {
+                return interaction.editReply({ content: validation.reason, flags: MessageFlags.Ephemeral });
+            }
+
+            const totalValue = Number((amount * company.current_price).toFixed(8));
+            const confirmRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`sell:confirm:${interaction.user.id}:${ticker}:${amount}`)
+                    .setLabel(`Confirm Sell (${fmt(totalValue)} tokens)`)
+                    .setStyle(ButtonStyle.Success),
+                new ButtonBuilder()
+                    .setCustomId(`sell:cancel:${interaction.user.id}`)
+                    .setLabel('Cancel')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+
+            return interaction.editReply({
+                embeds: [{
+                    title: `⚡ Instant Sell Confirmation — ${company.company_name} (${ticker})`,
+                    description: 'Sell your shares directly to the LAX Treasury for immediate liquidity without waiting for another player.',
+                    fields: [
+                        { name: 'Company', value: `**${company.company_name}** (\`${ticker}\`)`, inline: true },
+                        { name: 'Shares to Sell', value: `**${amount.toLocaleString()}** shares`, inline: true },
+                        { name: 'Buyback Price', value: `${fmt(company.current_price)} tokens/share`, inline: true },
+                        { name: 'Total Tokens to Receive', value: `**${fmt(totalValue)} tokens**`, inline: true },
+                        { name: 'Trading Fee', value: '0% (Exempt from 1% secondary fee)', inline: true },
+                        { name: '1-Hour Cooldown', value: 'Starts upon successful confirmation', inline: true },
+                    ],
+                    color: 0xFEE75C,
+                }],
+                components: [confirmRow],
+            });
+        }
+
+        // ── /add-user (Generic Private Ticket System) ─────────────────────────
+        if (commandName === 'add-user') {
+            if (!interaction.inGuild()) {
+                return interaction.editReply({ content: 'This command can only be used inside a server.', flags: MessageFlags.Ephemeral });
+            }
+
+            if (!ticketUtils.isAuthorizedStaff(interaction)) {
+                return interaction.editReply({
+                    content: '❌ Unauthorized: Only server Admins, Owners, or Representatives can use /add-user.',
+                    flags: MessageFlags.Ephemeral,
+                });
+            }
+
+            const channel = interaction.channel;
+            if (!ticketUtils.isTicketChannel(channel)) {
+                return interaction.editReply({
+                    content: '❌ This command can only be used inside an active ticket channel.',
+                    flags: MessageFlags.Ephemeral,
+                });
+            }
+
+            const targetUser = interaction.options.getUser('user');
+            const result = await ticketUtils.addUserToTicket({
+                channel,
+                targetUser,
+                executorUser: interaction.user,
+            });
+
+            if (!result.success) {
+                return interaction.editReply({ content: `❌ ${result.error}`, flags: MessageFlags.Ephemeral });
+            }
+
+            if (result.alreadyPresent) {
+                return interaction.editReply({
+                    content: `ℹ️ <@${targetUser.id}> already has access to this ticket.`,
+                });
+            }
+
+            await channel.send({
+                content: `👋 <@${targetUser.id}> has been added to this ticket by <@${interaction.user.id}>.`,
+                allowedMentions: { users: [targetUser.id] },
+            }).catch(() => {});
+
+            return interaction.editReply({
+                content: `✅ Successfully added <@${targetUser.id}> to this ticket.`,
+            });
+        }
+
+        // ── /treasury (Public Treasury Overview) ──────────────────────────────
+        if (commandName === 'treasury') {
+            const [account, inventory] = await Promise.all([
+                treasury.getLaxAccount(db),
+                treasury.getTreasuryInventory(db),
+            ]);
+
+            const totalSharesHeld = inventory.reduce((sum, item) => sum + item.shares, 0);
+
+            const holdingLines = inventory.length === 0
+                ? 'No shares currently held in LAX Treasury.'
+                : inventory.map(item => `• **${item.ticker}**: **${item.shares.toLocaleString()}** shares (Acq. Cost: ${fmt(item.total_acquisition_cost)} tokens)`).join('\n');
+
+            return interaction.editReply({
+                embeds: [{
+                    title: '🏛️ LAX Treasury & Accounting Overview',
+                    description: 'Public balance, liquidity accounting, and Treasury share reserves.',
+                    fields: [
+                        { name: 'LAX Accounting Balance', value: `**${fmt(account.balance)} tokens**`, inline: true },
+                        { name: 'Debt Floor', value: `**${fmt(account.debt_floor)} tokens**`, inline: true },
+                        { name: 'Instant Sell Status', value: account.kill_switch_enabled ? '🔴 **Disabled**' : '🟢 **Active**', inline: true },
+                        { name: 'Realized Profit/Loss', value: `**${fmt(account.realized_pnl)} tokens**`, inline: true },
+                        { name: 'Withdrawable Profit', value: `**${fmt(account.withdrawable_profit)} tokens**`, inline: true },
+                        { name: 'Total Treasury Shares', value: `**${totalSharesHeld.toLocaleString()} shares**`, inline: true },
+                        { name: 'Treasury Share Inventory', value: holdingLines, inline: false },
+                    ],
+                    color: 0x5865F2,
+                }],
+            });
+        }
+
+        // ── /admin-instant-sell (Admin Treasury Management) ───────────────────
+        if (commandName === 'admin-instant-sell') {
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
+
+            const action = interaction.options.getString('action');
+            const val = interaction.options.getNumber('value');
+
+            if (action === 'status') {
+                const [account, inventory] = await Promise.all([
+                    treasury.getLaxAccount(db),
+                    treasury.getTreasuryInventory(db),
+                ]);
+                const totalSharesHeld = inventory.reduce((sum, item) => sum + item.shares, 0);
+                return interaction.editReply({
+                    embeds: [{
+                        title: '⚙️ Admin: LAX Treasury & Accounting Status',
+                        fields: [
+                            { name: 'LAX Cash Balance', value: `${fmt(account.balance)} tokens`, inline: true },
+                            { name: 'Debt Floor', value: `${fmt(account.debt_floor)} tokens`, inline: true },
+                            { name: 'Kill Switch', value: account.kill_switch_enabled ? '🔴 Disabled' : '🟢 Active', inline: true },
+                            { name: 'Realized Profit/Loss', value: `${fmt(account.realized_pnl)} tokens`, inline: true },
+                            { name: 'Total Withdrawn', value: `${fmt(account.total_withdrawn)} tokens`, inline: true },
+                            { name: 'Withdrawable Profit', value: `${fmt(account.withdrawable_profit)} tokens`, inline: true },
+                            { name: 'Treasury Companies', value: `${inventory.length}`, inline: true },
+                            { name: 'Total Shares Held', value: `${totalSharesHeld}`, inline: true },
+                        ],
+                        color: 0x5865F2,
+                    }]
+                });
+            }
+
+            if (action === 'toggle-killswitch') {
+                const account = await treasury.getLaxAccount(db);
+                const newState = !account.kill_switch_enabled;
+                await treasury.setKillSwitch(db, newState);
+                return interaction.editReply({
+                    content: `✅ Instant Sell kill switch has been **${newState ? 'ENABLED (Instant Sell Disabled)' : 'DISABLED (Instant Sell Active)'}**.`,
+                });
+            }
+
+            if (action === 'set-debt-floor') {
+                if (val === null || isNaN(val) || val > 0) {
+                    return interaction.editReply({ content: '❌ Please provide a negative number or zero for debt floor (e.g. -10000).' });
+                }
+                await treasury.setDebtFloor(db, val);
+                return interaction.editReply({ content: `✅ LAX debt floor set to **${fmt(val)} tokens**.` });
+            }
+
+            if (action === 'withdraw-profit') {
+                if (val === null || isNaN(val) || val <= 0) {
+                    return interaction.editReply({ content: '❌ Please provide a positive amount of profit to withdraw.' });
+                }
+                const res = await treasury.withdrawRealizedProfit(db, { ownerId: interaction.user.id, amount: val });
+                if (!res.success) {
+                    return interaction.editReply({ content: `❌ ${res.error}` });
+                }
+                return interaction.editReply({
+                    content: `✅ Successfully withdrew **${fmt(res.withdrawnAmount)} tokens** of realized profit to your wallet. Remaining withdrawable profit: **${fmt(res.remainingWithdrawable)} tokens**.`,
+                });
+            }
         }
 
     } catch (err) {
