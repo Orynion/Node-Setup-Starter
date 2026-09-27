@@ -24,6 +24,11 @@ test('Slash command definitions verification', () => {
     assert.ok(provideShares, '/provide-shares must exist');
     assert.ok(provideShares.default_member_permissions !== undefined, '/provide-shares must have admin permissions set');
 
+    // Verify /admin-editcompany includes supply option
+    const editCompanyCmd = commands.find(c => c.name === 'admin-editcompany');
+    assert.ok(editCompanyCmd, '/admin-editcompany must exist');
+    assert.ok(editCompanyCmd.options.some(o => o.name === 'supply'), '/admin-editcompany must have supply option');
+
     // Check all essential commands are present
     const expected = [
         'balance', 'leaderboard', 'stock-buy', 'stock-sell', 'sell-cancel',

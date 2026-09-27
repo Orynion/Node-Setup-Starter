@@ -3,6 +3,7 @@ const {
     GatewayIntentBits,
     Events,
     PermissionFlagsBits,
+    MessageFlags,
     AttachmentBuilder,
     ActionRowBuilder,
     ButtonBuilder,
@@ -200,7 +201,7 @@ function sleep(ms) {
 }
 
 async function handleTicketButton(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const [, action, ticketType] = interaction.customId.split(':');
     if (!interaction.inGuild()) {
@@ -456,14 +457,14 @@ async function getOrCreateCashoutTicketChannel(guild, user) {
 
 async function handleCashoutButton(interaction) {
     if (!interaction.inGuild()) {
-        return interaction.reply({ content: 'Cashout buttons can only be used inside a server.', ephemeral: true });
+        return interaction.reply({ content: 'Cashout buttons can only be used inside a server.', flags: MessageFlags.Ephemeral });
     }
 
     const [, action, rawRequestId] = interaction.customId.split(':');
     const requestId = parseInt(rawRequestId, 10);
 
     if (action === 'approve') {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const isStaff = hasSupportRole(interaction) || isAdmin(interaction);
         if (!isStaff) {
             return interaction.editReply({
@@ -512,7 +513,7 @@ async function handleCashoutButton(interaction) {
     }
 
     if (action === 'reject') {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const isStaff = hasSupportRole(interaction) || isAdmin(interaction);
         if (!isStaff) {
             return interaction.editReply({
@@ -561,7 +562,7 @@ async function handleCashoutButton(interaction) {
 }
 
 async function handleCashoutModal(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const rawAmount = interaction.fields.getTextInputValue('cashout_amount')?.trim();
     const amount = parseFloat(rawAmount);
 
@@ -898,7 +899,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /admin-add-money ──────────────────────────────────────────────────
         if (commandName === 'admin-add-money') {
-            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
 
             const target = interaction.options.getUser('user');
             const amount = interaction.options.getNumber('amount');
@@ -916,7 +917,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /admin-remove-money ───────────────────────────────────────────────
         if (commandName === 'admin-remove-money') {
-            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
 
             const target = interaction.options.getUser('user');
             const amount = interaction.options.getNumber('amount');
@@ -936,7 +937,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (commandName === 'leaderboard') {
             const top = await db.prepare('SELECT discord_id, wallet_tokens FROM users ORDER BY wallet_tokens DESC LIMIT 10').all();
 
-            if (top.length === 0) return interaction.editReply({ content: 'No users found.', ephemeral: true });
+            if (top.length === 0) return interaction.editReply({ content: 'No users found.', flags: MessageFlags.Ephemeral });
 
             const medals = ['🥇', '🥈', '🥉'];
             const lines = await Promise.all(top.map(async (u, i) => {
@@ -966,7 +967,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const amount = interaction.options.getInteger('amount');
 
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, flags: MessageFlags.Ephemeral });
 
             const buyer = await getOrCreateUser(interaction.user.id);
             const portfolio = getPortfolio(buyer);
@@ -990,13 +991,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             if (remaining > 0) {
                 if (company.bot_share_reserve < remaining)
-                    return interaction.editReply({ content: `Not enough shares available. Bot reserve: **${company.bot_share_reserve}**, sell orders available: **${amount - remaining}**.`, ephemeral: true });
+                    return interaction.editReply({ content: `Not enough shares available. Bot reserve: **${company.bot_share_reserve}**, sell orders available: **${amount - remaining}**.`, flags: MessageFlags.Ephemeral });
                 totalCost += remaining * company.current_price;
                 sharesFromBot = remaining;
             }
 
             if (buyer.wallet_tokens < totalCost)
-                    return interaction.editReply({ content: `Insufficient tokens. Need **${fmt(totalCost)}**, you have **${fmt(buyer.wallet_tokens)}**.`, ephemeral: true });
+                    return interaction.editReply({ content: `Insufficient tokens. Need **${fmt(totalCost)}**, you have **${fmt(buyer.wallet_tokens)}**.`, flags: MessageFlags.Ephemeral });
 
             let newPrice = company.current_price;
             let totalFees = 0;
@@ -1101,14 +1102,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const amount = interaction.options.getInteger('amount');
 
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, flags: MessageFlags.Ephemeral });
 
             const user = await getOrCreateUser(interaction.user.id);
             const portfolio = getPortfolio(user);
             const owned = portfolio[ticker] || 0;
 
             if (owned < amount)
-                return interaction.editReply({ content: `You only own **${owned}** shares of **${ticker}**.`, ephemeral: true });
+                return interaction.editReply({ content: `You only own **${owned}** shares of **${ticker}**.`, flags: MessageFlags.Ephemeral });
 
             // Remove from portfolio
             portfolio[ticker] = owned - amount;
@@ -1145,20 +1146,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const cancelAmount = interaction.options.getInteger('amount') ?? null;
 
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, flags: MessageFlags.Ephemeral });
 
             const orders = await db.prepare(
                 'SELECT * FROM sell_orders WHERE seller_id = ? AND ticker = ? ORDER BY timestamp ASC'
             ).all(interaction.user.id, ticker);
 
             if (orders.length === 0)
-                return interaction.editReply({ content: `You have no active sell listings for **${ticker}**.`, ephemeral: true });
+                return interaction.editReply({ content: `You have no active sell listings for **${ticker}**.`, flags: MessageFlags.Ephemeral });
 
             const totalListed = orders.reduce((s, o) => s + o.shares, 0);
             const toCancel = cancelAmount !== null ? Math.min(cancelAmount, totalListed) : totalListed;
 
             if (toCancel <= 0)
-                return interaction.editReply({ content: `Nothing to cancel.`, ephemeral: true });
+                return interaction.editReply({ content: `Nothing to cancel.`, flags: MessageFlags.Ephemeral });
 
             // Remove orders oldest-first up to toCancel shares
             let remaining = toCancel;
@@ -1195,7 +1196,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     ],
                     color: 0x57F287,
                 }],
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         }
 
@@ -1203,7 +1204,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (commandName === 'stock-info') {
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, flags: MessageFlags.Ephemeral });
 
             const marketCap = company.current_price * company.shares_in_circulation;
             const sellOrderCount = await db.prepare('SELECT COUNT(*) as cnt, SUM(shares) as total FROM sell_orders WHERE ticker = ?').get(ticker);
@@ -1241,7 +1242,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // ── /stock-list ───────────────────────────────────────────────────────
         if (commandName === 'stock-list') {
             const companies = await db.prepare('SELECT * FROM companies ORDER BY current_price DESC').all();
-            if (companies.length === 0) return interaction.editReply({ content: 'No companies listed yet.', ephemeral: true });
+            if (companies.length === 0) return interaction.editReply({ content: 'No companies listed yet.', flags: MessageFlags.Ephemeral });
 
             const lines = companies.map(c => {
                 const change = ((c.current_price - c.ipo_share_price) / c.ipo_share_price * 100).toFixed(1);
@@ -1262,12 +1263,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (commandName === 'chart') {
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, flags: MessageFlags.Ephemeral });
 
             const history = await db.prepare('SELECT price, timestamp FROM price_history WHERE ticker = ? ORDER BY timestamp DESC LIMIT 60').all(ticker);
 
             if (history.length < 2)
-                return interaction.editReply({ content: `Not enough price history for **${ticker}** yet. Buy or sell some shares first!`, ephemeral: true });
+                return interaction.editReply({ content: `Not enough price history for **${ticker}** yet. Buy or sell some shares first!`, flags: MessageFlags.Ephemeral });
 
             history.reverse();
             const prices = history.map(h => h.price);
@@ -1297,16 +1298,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /admin-removecompany ──────────────────────────────────────────────
         if (commandName === 'admin-removecompany') {
-            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
 
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const confirm = interaction.options.getString('confirm') ?? 'yes';
 
             if (confirm === 'no')
-                return interaction.editReply({ content: `❌ Removal of **${ticker}** cancelled.`, ephemeral: true });
+                return interaction.editReply({ content: `❌ Removal of **${ticker}** cancelled.`, flags: MessageFlags.Ephemeral });
 
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, flags: MessageFlags.Ephemeral });
 
             await db.prepare('DELETE FROM companies WHERE ticker = ?').run(ticker);
             await db.prepare('DELETE FROM price_history WHERE ticker = ?').run(ticker);
@@ -1323,20 +1324,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /admin-editcompany ────────────────────────────────────────────────
         if (commandName === 'admin-editcompany') {
-            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
 
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
-            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+            if (!company) return interaction.editReply({ content: `Company **${ticker}** not found.`, flags: MessageFlags.Ephemeral });
 
-            const newName  = interaction.options.getString('name')   ?? company.company_name;
-            const newOwner = interaction.options.getUser('owner');
-            const newPrice = interaction.options.getNumber('price')  ?? company.current_price;
-            const newEmoji = interaction.options.getString('emoji')  ?? company.emoji ?? '🏢';
-            const ownerId  = newOwner ? newOwner.id : company.owner_id;
+            const newName   = interaction.options.getString('name')   ?? company.company_name;
+            const newOwner  = interaction.options.getUser('owner');
+            const newPrice  = interaction.options.getNumber('price')  ?? company.current_price;
+            const newEmoji  = interaction.options.getString('emoji')  ?? company.emoji ?? '🏢';
+            const newSupply = interaction.options.getInteger('supply');
+            const ownerId   = newOwner ? newOwner.id : company.owner_id;
 
-            await db.prepare(`UPDATE companies SET company_name = ?, owner_id = ?, current_price = ?, emoji = ? WHERE ticker = ?`)
-                .run(newName, ownerId, newPrice, newEmoji, ticker);
+            let updatedTotalSupply = company.total_supply;
+            let updatedBotReserve  = company.bot_share_reserve;
+
+            if (newSupply !== null && newSupply !== undefined) {
+                if (newSupply < company.shares_in_circulation) {
+                    return interaction.editReply({
+                        content: `❌ Cannot set total supply to **${newSupply.toLocaleString()}**. There are already **${company.shares_in_circulation.toLocaleString()}** shares in circulation. Total supply must be at least **${company.shares_in_circulation.toLocaleString()}**.`,
+                        flags: MessageFlags.Ephemeral,
+                    });
+                }
+                updatedTotalSupply = newSupply;
+                updatedBotReserve = newSupply - company.shares_in_circulation;
+            }
+
+            await db.prepare(`UPDATE companies SET company_name = ?, owner_id = ?, current_price = ?, emoji = ?, total_supply = ?, bot_share_reserve = ? WHERE ticker = ?`)
+                .run(newName, ownerId, newPrice, newEmoji, updatedTotalSupply, updatedBotReserve, ticker);
 
             if (newPrice !== company.current_price) await recordPrice(ticker, newPrice);
 
@@ -1344,6 +1360,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (newName !== company.company_name)   changes.push(`Name → **${newName}**`);
             if (ownerId !== company.owner_id)        changes.push(`Owner → **${newOwner.username}**`);
             if (newPrice !== company.current_price) changes.push(`Price → **${fmt(newPrice)}** tokens`);
+            if (newSupply !== null && newSupply !== undefined && newSupply !== company.total_supply) {
+                changes.push(`Total Supply → **${updatedTotalSupply.toLocaleString()}** (Reserve: **${updatedBotReserve.toLocaleString()}**)`);
+            }
             if (newEmoji !== (company.emoji ?? '🏢')) changes.push(`Emoji → ${newEmoji}`);
 
             return interaction.editReply({
@@ -1357,26 +1376,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /provide-shares ───────────────────────────────────────────────────
         if (commandName === 'provide-shares') {
-            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
 
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const targetUser = interaction.options.getUser('user');
             const amount = interaction.options.getInteger('amount');
 
             if (amount <= 0) {
-                return interaction.editReply({ content: 'Amount must be greater than 0.', ephemeral: true });
+                return interaction.editReply({ content: 'Amount must be greater than 0.', flags: MessageFlags.Ephemeral });
             }
 
             const company = await db.prepare('SELECT * FROM companies WHERE ticker = ?').get(ticker);
             if (!company) {
-                return interaction.editReply({ content: `Company **${ticker}** not found.`, ephemeral: true });
+                return interaction.editReply({ content: `Company **${ticker}** not found.`, flags: MessageFlags.Ephemeral });
             }
 
             // Validate that the company has enough unallocated reserve shares
             if (company.bot_share_reserve < amount) {
                 return interaction.editReply({
                     content: `Insufficient unallocated shares. **${ticker}** has **${company.bot_share_reserve.toLocaleString()}** unallocated shares in reserve, but you requested **${amount.toLocaleString()}**.`,
-                    ephemeral: true,
+                    flags: MessageFlags.Ephemeral,
                 });
             }
 
@@ -1533,7 +1552,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // ── /cashout ─────────────────────────────────────────────────────────
         if (commandName === 'cashout') {
             if (!interaction.inGuild()) {
-                return interaction.editReply({ content: 'The /cashout command can only be used inside a server.', ephemeral: true });
+                return interaction.editReply({ content: 'The /cashout command can only be used inside a server.', flags: MessageFlags.Ephemeral });
             }
 
             const amount = interaction.options.getNumber('amount');
@@ -1542,7 +1561,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (amount !== null) {
                 const validation = validateCashoutAmount(amount, user.wallet_tokens);
                 if (!validation.valid) {
-                    return interaction.editReply({ content: `❌ ${validation.reason}`, ephemeral: true });
+                    return interaction.editReply({ content: `❌ ${validation.reason}`, flags: MessageFlags.Ephemeral });
                 }
             }
 
@@ -1557,7 +1576,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 });
 
                 if (!reqResult.success) {
-                    return interaction.editReply({ content: `❌ ${reqResult.error}`, ephemeral: true });
+                    return interaction.editReply({ content: `❌ ${reqResult.error}`, flags: MessageFlags.Ephemeral });
                 }
 
                 const actionRow = new ActionRowBuilder().addComponents(
@@ -1635,7 +1654,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /admin-addcompany ─────────────────────────────────────────────────
         if (commandName === 'admin-addcompany') {
-            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
 
             const ticker = interaction.options.getString('ticker').toUpperCase();
             const name = interaction.options.getString('name');
@@ -1645,7 +1664,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const emoji = interaction.options.getString('emoji') ?? '🏢';
 
             const existing = await db.prepare('SELECT ticker FROM companies WHERE ticker = ?').get(ticker);
-            if (existing) return interaction.editReply({ content: `Company **${ticker}** already exists.`, ephemeral: true });
+            if (existing) return interaction.editReply({ content: `Company **${ticker}** already exists.`, flags: MessageFlags.Ephemeral });
 
             await db.prepare(`INSERT INTO companies
                 (ticker, company_name, owner_id, ipo_share_price, current_price, total_supply, shares_in_circulation, bot_share_reserve, pending_cashout_tokens, all_time_earnings, emoji)
@@ -1671,7 +1690,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /economy-backup ───────────────────────────────────────────────────
         if (commandName === 'economy-backup') {
-            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
 
             const code = await generateBackup();
             const buf = Buffer.from(code, 'utf-8');
@@ -1698,7 +1717,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // ── /economy-restore ──────────────────────────────────────────────────
         if (commandName === 'economy-restore') {
-            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', ephemeral: true });
+            if (!isAdmin(interaction)) return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
 
             const attachment = interaction.options.getAttachment('backup');
 
@@ -1833,7 +1852,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     fields,
                     color: 0x5865F2,
                 }],
-                ephemeral: true,
+                flags: MessageFlags.Ephemeral,
             });
         }
 
@@ -1903,7 +1922,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     } catch (err) {
         console.error(`Error in /${commandName}:`, err);
-        const msg = { content: 'Something went wrong. Please try again.', ephemeral: true };
+        const msg = { content: 'Something went wrong. Please try again.', flags: MessageFlags.Ephemeral };
         await interaction.editReply(msg).catch(() => {});
     }
 });

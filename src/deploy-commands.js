@@ -82,6 +82,7 @@ const commands = [
         .addStringOption(o => o.setName('name').setDescription('New company name').setRequired(false))
         .addUserOption(o => o.setName('owner').setDescription('New owner').setRequired(false))
         .addNumberOption(o => o.setName('price').setDescription('New current price').setRequired(false).setMinValue(0.01))
+        .addIntegerOption(o => o.setName('supply').setDescription('New total share supply').setRequired(false).setMinValue(1))
         .addStringOption(o => o.setName('emoji').setDescription('New emoji').setRequired(false))
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
