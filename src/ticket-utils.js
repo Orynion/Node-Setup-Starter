@@ -5,20 +5,14 @@ const OWNER_ROLE_ID = '1478001619030511747';
 const REPRESENTATIVE_ROLE_ID = '1543952151364116490';
 
 /**
- * Checks whether a given Discord interaction is from authorized staff (Admin, Owner role, Representative role).
+ * Checks whether a given Discord interaction is from an Administrator.
  */
 function isAuthorizedStaff(interaction) {
     if (!interaction.inGuild()) return false;
     const member = interaction.member;
     if (!member) return false;
 
-    const isAdmin = member.permissions?.has(PermissionFlagsBits.Administrator);
-    if (isAdmin) return true;
-
-    const hasStaffRole = member.roles?.cache?.some(role =>
-        role.id === OWNER_ROLE_ID || role.id === REPRESENTATIVE_ROLE_ID
-    );
-    return Boolean(hasStaffRole);
+    return Boolean(member.permissions?.has(PermissionFlagsBits.Administrator));
 }
 
 /**

@@ -4,12 +4,13 @@ const { ChannelType, PermissionFlagsBits } = require('discord.js');
 const ticketUtils = require('../src/ticket-utils.js');
 const { commands } = require('../src/deploy-commands.js');
 
-test('Deploy Commands: /add-user slash command is registered', () => {
+test('Deploy Commands: /add-user slash command is registered as admin-only', () => {
     const addUserCmd = commands.find(c => c.name === 'add-user');
     assert.ok(addUserCmd, '/add-user command must be defined');
     assert.strictEqual(addUserCmd.options.length, 1);
     assert.strictEqual(addUserCmd.options[0].name, 'user');
     assert.strictEqual(addUserCmd.options[0].required, true);
+    assert.ok(addUserCmd.default_member_permissions !== undefined, 'Admin permission must be set on /add-user');
 });
 
 test('Ticket Detection: Works for all LAX ticket types and rejects non-tickets', () => {
@@ -41,7 +42,7 @@ test('Ticket Detection: Works for all LAX ticket types and rejects non-tickets',
     assert.strictEqual(ticketUtils.isTicketChannel(null), false, 'Null channel must be rejected');
 });
 
-test('Authorization: Staff roles and Admins are authorized, regular members are rejected', () => {
+test('Authorization: Only Administrators are authorized for /add-user, regular members are rejected', () => {
     // 1. Admin member
     const adminInteraction = {
         inGuild: () => true,
@@ -52,27 +53,17 @@ test('Authorization: Staff roles and Admins are authorized, regular members are 
     };
     assert.strictEqual(ticketUtils.isAuthorizedStaff(adminInteraction), true);
 
-    // 2. Owner role member
-    const ownerInteraction = {
+    // 2. Non-admin member
+    const nonAdminInteraction = {
         inGuild: () => true,
         member: {
             permissions: { has: () => false },
-            roles: { cache: [{ id: ticketUtils.OWNER_ROLE_ID }] },
+            roles: { cache: [] },
         },
     };
-    assert.strictEqual(ticketUtils.isAuthorizedStaff(ownerInteraction), true);
+    assert.strictEqual(ticketUtils.isAuthorizedStaff(nonAdminInteraction), false);
 
-    // 3. Representative role member
-    const repInteraction = {
-        inGuild: () => true,
-        member: {
-            permissions: { has: () => false },
-            roles: { cache: [{ id: ticketUtils.REPRESENTATIVE_ROLE_ID }] },
-        },
-    };
-    assert.strictEqual(ticketUtils.isAuthorizedStaff(repInteraction), true);
-
-    // 4. Regular member (no staff roles or admin)
+    // 3. Regular member (no admin)
     const normalInteraction = {
         inGuild: () => true,
         member: {
@@ -82,7 +73,7 @@ test('Authorization: Staff roles and Admins are authorized, regular members are 
     };
     assert.strictEqual(ticketUtils.isAuthorizedStaff(normalInteraction), false);
 
-    // 5. DM interaction (not in guild)
+    // 4. DM interaction (not in guild)
     const dmInteraction = {
         inGuild: () => false,
         member: null,

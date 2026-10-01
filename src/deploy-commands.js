@@ -113,8 +113,9 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('add-user')
-        .setDescription('Staff: Add a user to this private ticket channel')
-        .addUserOption(o => o.setName('user').setDescription('Target user to add to this ticket').setRequired(true)),
+        .setDescription('Admin: Add a user to this private ticket channel')
+        .addUserOption(o => o.setName('user').setDescription('Target user to add to this ticket').setRequired(true))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
     new SlashCommandBuilder()
         .setName('treasury')

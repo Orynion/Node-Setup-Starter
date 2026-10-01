@@ -29,6 +29,8 @@ const {
 const treasury = require('./src/treasury.js');
 const ticketUtils = require('./src/ticket-utils.js');
 const { askLaxAi } = require('./src/ai.js');
+const scamShield = require('./src/scam-shield.js');
+
 
 const deflate = promisify(zlib.deflate);
 const inflate = promisify(zlib.inflate);
@@ -2135,17 +2137,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
         }
 
-        // ── /add-user (Generic Private Ticket System) ─────────────────────────
+        // ── /add-user (Ticket System User Management) ────────────────────────
         if (commandName === 'add-user') {
-            if (!interaction.inGuild()) {
-                return interaction.editReply({ content: 'This command can only be used inside a server.', flags: MessageFlags.Ephemeral });
-            }
-
-            if (!ticketUtils.isAuthorizedStaff(interaction)) {
-                return interaction.editReply({
-                    content: '❌ Unauthorized: Only server Admins, Owners, or Representatives can use /add-user.',
-                    flags: MessageFlags.Ephemeral,
-                });
+            if (!isAdmin(interaction)) {
+                return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
             }
 
             const channel = interaction.channel;
@@ -2328,6 +2323,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.on(Events.MessageCreate, async (message) => {
+    // 1. ScamShield: Auto-detect and remove known scam image templates across all channels
+    try {
+        const scamResult = await scamShield.handleMessage(message, client);
+        if (scamResult?.deleted) {
+            // Message was a detected scam and got deleted; stop further processing
+            return;
+        }
+    } catch (scamErr) {
+        console.error('[ScamShield] Message scan error:', scamErr);
+    }
+
+    // 2. Mention auto-reply handler
     if (
         message.author.bot ||
         !client.user ||
