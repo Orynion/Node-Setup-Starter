@@ -1,5 +1,7 @@
 const test = require('node:test');
+const { after } = require('node:test');
 const assert = require('node:assert/strict');
+
 const fs = require('fs');
 const path = require('path');
 const sharp = require('sharp');
@@ -180,7 +182,7 @@ test('ScamShield: Messages with no attachments are skipped cleanly', async () =>
 
     const result = await scamShield.handleMessage(mockMessage, null);
     assert.strictEqual(result.scanned, false);
-    assert.strictEqual(result.reason, 'no_attachments');
+    assert.strictEqual(result.reason, 'no_image_attachments');
 });
 
 test('ScamShield: Detection failure (corrupted image / download failure) does NOT delete message', async () => {
@@ -386,3 +388,8 @@ test('ScamShield: 10-second Periodic Channel Scanner sweeps and detects scam att
         global.fetch = originalFetch;
     }
 });
+
+after(async () => {
+    await scamShield.terminateLocalOcr();
+});
+
