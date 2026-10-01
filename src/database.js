@@ -152,6 +152,16 @@ const schema = `
         PRIMARY KEY (user_id, action)
     );
 
+    CREATE TABLE IF NOT EXISTS scam_fingerprints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        label TEXT NOT NULL,
+        phash TEXT NOT NULL UNIQUE,
+        dhash TEXT,
+        ahash TEXT,
+        added_by TEXT,
+        created_at INTEGER NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_trade_ledger_timestamp
         ON trade_ledger (timestamp);
 

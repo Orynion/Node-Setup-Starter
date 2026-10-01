@@ -176,6 +176,7 @@ const commands = [
         .addStringOption(o => o.setName('image_url').setDescription('Image URL beginning with http:// or https://').setRequired(false).setMaxLength(2048))
         .addStringOption(o => o.setName('footer').setDescription('Footer text').setRequired(false).setMaxLength(2048))
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
 ].map(cmd => cmd.toJSON());
 
 async function registerCommands(targetGuildId, clientInstance) {

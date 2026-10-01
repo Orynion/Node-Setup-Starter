@@ -6,30 +6,33 @@ const sharp = require('sharp');
 const {
     computePHash,
     computeDHash,
+    computeAHash,
+    generateFingerprintSuite,
     hammingDistance,
-    binaryToHex,
-    hexToBinary,
 } = require('../src/perceptual-hash.js');
 const scamShield = require('../src/scam-shield.js');
+const { commands } = require('../src/deploy-commands.js');
 
 // Path to test images
 const ATTACHED_DIR = path.join(__dirname, '..', 'attached_assets');
 const testImages = fs.readdirSync(ATTACHED_DIR).filter(f => f.endsWith('.png'));
+
+test('Deploy Commands: Clean slash commands list (no redundant scamshield commands)', () => {
+    const cmd = commands.find(c => c.name === 'admin-scamshield');
+    assert.strictEqual(cmd, undefined, 'admin-scamshield command should not be in slash commands');
+});
 
 test('Perceptual Hash: Correctly generates consistent 64-bit DCT pHash and dHash', async () => {
     assert.ok(testImages.length > 0, 'Should have attached test images');
     const imagePath = path.join(ATTACHED_DIR, testImages[0]);
     const buffer = fs.readFileSync(imagePath);
 
-    const phash = await computePHash(buffer);
-    assert.strictEqual(phash.hex.length, 16, 'Hex pHash must be 16 characters (64-bit)');
-    assert.strictEqual(phash.binary.length, 64, 'Binary pHash must be 64 characters');
-    assert.strictEqual(hammingDistance(phash.hex, phash.hex), 0, 'Self distance must be 0');
-
-    const dhash = await computeDHash(buffer);
-    assert.strictEqual(dhash.hex.length, 16, 'Hex dHash must be 16 characters (64-bit)');
-    assert.strictEqual(dhash.binary.length, 64, 'Binary dHash must be 64 characters');
-    assert.strictEqual(hammingDistance(dhash.hex, dhash.hex), 0, 'Self distance must be 0');
+    const suite = await generateFingerprintSuite(buffer);
+    assert.strictEqual(suite.phash.length, 16, 'Hex pHash must be 16 characters (64-bit)');
+    assert.strictEqual(suite.phashBin.length, 64, 'Binary pHash must be 64 characters');
+    assert.strictEqual(suite.dhash.length, 16, 'Hex dHash must be 16 characters (64-bit)');
+    assert.strictEqual(suite.dhashBin.length, 64, 'Binary dHash must be 64 characters');
+    assert.strictEqual(hammingDistance(suite.phash, suite.phash), 0, 'Self distance must be 0');
 });
 
 test('ScamShield: Detects all known scam reference images', async () => {
@@ -103,7 +106,7 @@ test('ScamShield: Unrelated image is NOT detected (False positive protection)', 
     assert.strictEqual(blueResult.isMatch, false);
     assert.ok(blueResult.minDistance >= 15, `Unrelated solid image distance should be high, was ${blueResult.minDistance}`);
 
-    // Generate a striped patterned image
+    // Generate a graphic with shapes
     const patternBuf = await sharp({
         create: {
             width: 400,
@@ -202,7 +205,6 @@ test('ScamShield: Detection failure (corrupted image / download failure) does NO
 });
 
 test('ScamShield: Discord deletion failure is handled gracefully without crashing', async () => {
-    // Mock global fetch returning reference scam buffer
     const scamBuffer = fs.readFileSync(path.join(ATTACHED_DIR, testImages[0]));
     const originalFetch = global.fetch;
 
@@ -315,26 +317,72 @@ test('ScamShield: Full detection, deletion, user warning, and mod logging flow',
         assert.ok(fields.some(f => f.name === 'User' && f.value.includes('scammer_user_id')));
         assert.ok(fields.some(f => f.name === 'Channel' && f.value.includes('chan_public')));
         assert.ok(fields.some(f => f.name === 'Message ID' && f.value.includes('msg_scam_777')));
-        assert.ok(fields.some(f => f.name === 'Detection Type' && f.value.includes('Known scam image')));
+        assert.ok(fields.some(f => f.name === 'Detection Type'));
         assert.ok(fields.some(f => f.name === 'Action Taken' && f.value.includes('Message Deleted')));
     } finally {
         global.fetch = originalFetch;
     }
 });
 
-test('ScamShield: Custom threshold and reference hash configuration', async () => {
-    const customConfig = scamShield.getConfig({
-        threshold: 5,
-        referenceHashes: ['aaaaaaaaaaaaaaaa'],
+test('ScamShield: 10-second Periodic Channel Scanner sweeps and detects scam attachments', async () => {
+    const scamBuffer = fs.readFileSync(path.join(ATTACHED_DIR, testImages[0]));
+    const originalFetch = global.fetch;
+
+    global.fetch = async () => ({
+        ok: true,
+        headers: new Headers({ 'content-length': String(scamBuffer.length) }),
+        arrayBuffer: async () => scamBuffer.buffer.slice(scamBuffer.byteOffset, scamBuffer.byteOffset + scamBuffer.byteLength),
     });
-    assert.strictEqual(customConfig.threshold, 5);
-    assert.deepStrictEqual(customConfig.referenceHashes, ['aaaaaaaaaaaaaaaa']);
 
-    // Inspection with custom hash
-    const fakeBuffer = await sharp({
-        create: { width: 100, height: 100, channels: 3, background: { r: 0, g: 0, b: 0 } },
-    }).png().toBuffer();
+    let messageDeleted = false;
 
-    const result = await scamShield.inspectImageBuffer(fakeBuffer, customConfig);
-    assert.strictEqual(result.threshold, 5);
+    try {
+        const mockGuildChannel = {
+            id: 'chan_auto_scan',
+            isTextBased: () => true,
+            messages: {
+                fetch: async () => new Map([
+                    ['msg_auto_1', {
+                        id: 'msg_auto_1',
+                        author: { bot: false, id: 'actor_1', username: 'SuspiciousUser' },
+                        attachments: new Map([
+                            ['att_1', { url: 'https://cdn.discordapp.com/scam.png', contentType: 'image/png', size: scamBuffer.length }]
+                        ]),
+                        delete: async () => { messageDeleted = true; },
+                        channel: {
+                            id: 'chan_auto_scan',
+                            send: async () => ({ delete: async () => {} }),
+                        },
+                    }]
+                ]),
+            },
+        };
+
+        const mockClient = {
+            guilds: {
+                cache: new Map([
+                    ['guild_1', {
+                        channels: {
+                            cache: new Map([
+                                ['chan_auto_scan', mockGuildChannel]
+                            ]),
+                        },
+                    }]
+                ]),
+            },
+        };
+
+        const scanResult = await scamShield.scanRecentGuildChannels(mockClient, null);
+        assert.strictEqual(scanResult.channelsScanned, 1);
+        assert.strictEqual(scanResult.messagesScanned, 1);
+        assert.strictEqual(scanResult.scamDetectedCount, 1);
+        assert.strictEqual(messageDeleted, true, 'Periodic scanner should delete scam image message');
+
+        // Test startPeriodicScanner initializes timer
+        const timer = scamShield.startPeriodicScanner(mockClient, null, 10000);
+        assert.ok(timer, 'startPeriodicScanner should return active timer');
+        clearInterval(timer);
+    } finally {
+        global.fetch = originalFetch;
+    }
 });

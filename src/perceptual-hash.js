@@ -1,6 +1,4 @@
 const sharp = require('sharp');
-const path = require('path');
-const fs = require('fs');
 
 /**
  * Computes 64-bit DCT perceptual hash (pHash).
@@ -87,6 +85,52 @@ async function computeDHash(imageBuffer) {
     return { binary, hex };
 }
 
+/**
+ * Computes 64-bit average hash (aHash).
+ * 1. Grayscale & resize to 8x8.
+ * 2. Calculate average pixel value.
+ * 3. Compare pixel >= avg.
+ */
+async function computeAHash(imageBuffer) {
+    const { data } = await sharp(imageBuffer)
+        .grayscale()
+        .resize(8, 8, { fit: 'fill' })
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+    let sum = 0;
+    for (let i = 0; i < 64; i++) sum += data[i];
+    const avg = sum / 64;
+
+    let binary = '';
+    for (let i = 0; i < 64; i++) {
+        binary += data[i] >= avg ? '1' : '0';
+    }
+
+    const hex = binaryToHex(binary);
+    return { binary, hex };
+}
+
+/**
+ * Generates a full fingerprint suite (pHash, dHash, aHash).
+ */
+async function generateFingerprintSuite(imageBuffer) {
+    const [pHashRes, dHashRes, aHashRes] = await Promise.all([
+        computePHash(imageBuffer),
+        computeDHash(imageBuffer),
+        computeAHash(imageBuffer),
+    ]);
+
+    return {
+        phash: pHashRes.hex,
+        phashBin: pHashRes.binary,
+        dhash: dHashRes.hex,
+        dhashBin: dHashRes.binary,
+        ahash: aHashRes.hex,
+        ahashBin: aHashRes.binary,
+    };
+}
+
 function binaryToHex(binary) {
     let hex = '';
     for (let i = 0; i < binary.length; i += 4) {
@@ -107,6 +151,7 @@ function hexToBinary(hex) {
 }
 
 function hammingDistance(h1, h2) {
+    if (!h1 || !h2) return Infinity;
     const bin1 = h1.length === 64 && /^[01]+$/.test(h1) ? h1 : hexToBinary(h1);
     const bin2 = h2.length === 64 && /^[01]+$/.test(h2) ? h2 : hexToBinary(h2);
 
@@ -121,6 +166,8 @@ function hammingDistance(h1, h2) {
 module.exports = {
     computePHash,
     computeDHash,
+    computeAHash,
+    generateFingerprintSuite,
     binaryToHex,
     hexToBinary,
     hammingDistance,

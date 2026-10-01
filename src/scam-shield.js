@@ -1,23 +1,40 @@
-const { computePHash, computeDHash, hammingDistance, binaryToHex } = require('./perceptual-hash.js');
+const {
+    computePHash,
+    computeDHash,
+    computeAHash,
+    generateFingerprintSuite,
+    hammingDistance,
+} = require('./perceptual-hash.js');
 
 /**
  * Default perceptual hash fingerprints of known scam templates.
- * Stored as 16-character hexadecimal strings (64-bit DCT pHash).
- * These fingerprints are generated from the known reference scam images.
+ * Stored with descriptive labels and both pHash and dHash fingerprints.
  */
-const DEFAULT_SCAM_FINGERPRINTS = [
-    'bf30c81dd90f44ec', // Template 1: Fake crypto casino announcement
-    'be8513852d6347c7', // Template 2: Fake bonus promo code / rakeback claim
-    'd07295979d97c1c1', // Template 3: Fake withdrawal success screen
+const DEFAULT_SCAM_TEMPLATES = [
+    {
+        label: 'Template 1: Fake MrBeast Crypto Casino Giveaway',
+        phash: 'bf30c81dd90f44ec',
+        dhash: '80e080a0c08181c0',
+        ahash: '0000000000000000',
+    },
+    {
+        label: 'Template 2: Tolawin Bonus Code Activation (BET)',
+        phash: 'be8513852d6347c7',
+        dhash: '80c2c2c0c8c4c6ca',
+        ahash: '0000000000000000',
+    },
+    {
+        label: 'Template 3: Tolawin Withdrawal Success $5,600 Modal',
+        phash: 'd07295979d97c1c1',
+        dhash: '4b71716171714949',
+        ahash: '0000000000000000',
+    },
 ];
 
 // Maximum allowed image attachment size (8 MB)
 const MAX_IMAGE_FILE_SIZE = 8 * 1024 * 1024;
 
 // Default Hamming distance threshold for 64-bit DCT pHash
-// 0-4: identical/near-identical with heavy compression
-// 5-10: resized/re-encoded scam copies
-// >20: distinct/unrelated images (random image average distance is ~32)
 const DEFAULT_DISTANCE_THRESHOLD = 10;
 
 // User warning message sent in channel after scam deletion
@@ -25,9 +42,17 @@ const SCAM_WARNING_MESSAGE =
     '⚠️ This image was automatically removed because it matched a known scam/spam image.\n\n' +
     'If you believe this was a mistake, please contact server staff.';
 
+// In-memory cache for dynamic DB-backed fingerprints
+let cachedDbFingerprints = null;
+let lastCacheSync = 0;
+const CACHE_TTL_MS = 60000;
+
+// Track scanned message IDs to avoid redundant processing in periodic sweeps
+const seenScannedMessageIds = new Set();
+const MAX_SEEN_MESSAGES = 10000;
+
 /**
  * Retrieves the active configuration for ScamShield.
- * Allows override via environment variables.
  */
 function getConfig(overrides = {}) {
     const envEnabled = process.env.SCAM_IMAGE_DETECTION_ENABLED;
@@ -49,7 +74,7 @@ function getConfig(overrides = {}) {
         ? overrides.autoDeleteSeconds
         : (parseInt(process.env.SCAM_IMAGE_WARNING_AUTO_DELETE_SECONDS, 10) || 10);
 
-    let referenceHashes = [...DEFAULT_SCAM_FINGERPRINTS];
+    let referenceHashes = DEFAULT_SCAM_TEMPLATES.map(t => t.phash);
     const customHashesEnv = process.env.SCAM_IMAGE_REFERENCE_HASHES || process.env.SCAM_IMAGE_REFERENCE_HASH;
     if (customHashesEnv && customHashesEnv.trim()) {
         const parsedCustom = customHashesEnv
@@ -75,27 +100,69 @@ function getConfig(overrides = {}) {
 }
 
 /**
+ * Loads all active fingerprints combining defaults, environment, and database records.
+ */
+async function loadAllActiveFingerprints(db = null, config = getConfig()) {
+    const list = [...DEFAULT_SCAM_TEMPLATES];
+
+    // Merge any environment-configured custom hashes
+    for (const h of config.referenceHashes) {
+        if (!list.some(item => item.phash.toLowerCase() === h.toLowerCase())) {
+            list.push({
+                label: 'Configured Reference Template',
+                phash: h.toLowerCase(),
+                dhash: null,
+                ahash: null,
+            });
+        }
+    }
+
+    // Merge database stored fingerprints if db is available
+    if (db) {
+        const now = Date.now();
+        if (cachedDbFingerprints && now - lastCacheSync < CACHE_TTL_MS) {
+            for (const item of cachedDbFingerprints) {
+                if (!list.some(existing => existing.phash.toLowerCase() === item.phash.toLowerCase())) {
+                    list.push(item);
+                }
+            }
+        } else {
+            try {
+                const rows = await db.prepare('SELECT * FROM scam_fingerprints').all();
+                cachedDbFingerprints = rows || [];
+                lastCacheSync = now;
+                for (const item of cachedDbFingerprints) {
+                    if (!list.some(existing => existing.phash.toLowerCase() === item.phash.toLowerCase())) {
+                        list.push(item);
+                    }
+                }
+            } catch (err) {
+                // Ignore DB error if table is not yet initialized in isolated unit tests
+            }
+        }
+    }
+
+    return list;
+}
+
+/**
  * Checks if a Discord attachment is an eligible image.
  */
 function isImageAttachment(attachment, maxBytes = MAX_IMAGE_FILE_SIZE) {
     if (!attachment || typeof attachment !== 'object') return false;
 
-    // Check size limit
     if (typeof attachment.size === 'number' && (attachment.size <= 0 || attachment.size > maxBytes)) {
         return false;
     }
 
-    // Check content type
     if (attachment.contentType && typeof attachment.contentType === 'string') {
         const ct = attachment.contentType.toLowerCase();
         if (ct.startsWith('image/')) {
-            // Exclude svgs if any
             if (ct === 'image/svg+xml') return false;
             return true;
         }
     }
 
-    // Fallback to filename extension
     const name = (attachment.name || attachment.url || '').toLowerCase();
     return /\.(png|jpe?g|webp|bmp|tiff|avif)$/i.test(name.split('?')[0]);
 }
@@ -142,23 +209,28 @@ async function downloadImageBuffer(url, { timeoutMs = 5000, maxBytes = MAX_IMAGE
 }
 
 /**
- * Compares an image buffer against reference scam fingerprints.
+ * Inspects an image buffer and performs multi-fingerprint matching.
  */
-async function inspectImageBuffer(imageBuffer, config = getConfig()) {
+async function inspectImageBuffer(imageBuffer, config = getConfig(), db = null) {
     try {
-        const { hex, binary } = await computePHash(imageBuffer);
+        const suite = await generateFingerprintSuite(imageBuffer);
+        const allTemplates = await loadAllActiveFingerprints(db, config);
 
         let isMatch = false;
         let minDistance = Infinity;
-        let matchedReferenceHash = null;
+        let matchedTemplate = null;
 
-        for (const refHash of config.referenceHashes) {
-            const dist = hammingDistance(hex, refHash);
-            if (dist < minDistance) {
-                minDistance = dist;
-                matchedReferenceHash = refHash;
+        for (const tmpl of allTemplates) {
+            const pDist = hammingDistance(suite.phash, tmpl.phash);
+            const dDist = tmpl.dhash ? hammingDistance(suite.dhash, tmpl.dhash) : Infinity;
+
+            const effectiveDist = Math.min(pDist, dDist);
+            if (effectiveDist < minDistance) {
+                minDistance = effectiveDist;
+                matchedTemplate = tmpl;
             }
-            if (dist <= config.threshold) {
+
+            if (pDist <= config.threshold || (tmpl.dhash && dDist <= config.threshold)) {
                 isMatch = true;
             }
         }
@@ -166,10 +238,12 @@ async function inspectImageBuffer(imageBuffer, config = getConfig()) {
         return {
             success: true,
             isMatch,
-            hash: hex,
-            binary,
+            hash: suite.phash,
+            dhash: suite.dhash,
+            ahash: suite.ahash,
             minDistance,
-            matchedReferenceHash,
+            matchedReferenceHash: matchedTemplate?.phash || null,
+            matchedLabel: matchedTemplate?.label || 'Known scam image',
             threshold: config.threshold,
         };
     } catch (err) {
@@ -191,7 +265,7 @@ async function sendModLog(client, logChannelId, logData) {
         const channel = await client.channels.fetch(logChannelId).catch(() => null);
         if (!channel || typeof channel.send !== 'function') return;
 
-        const { user, channel: msgChannel, messageId, timestamp, distance, threshold } = logData;
+        const { user, channel: msgChannel, messageId, timestamp, distance, threshold, matchedLabel } = logData;
 
         const embed = {
             title: '🛡️ ScamShield: Known Scam Image Detected',
@@ -214,7 +288,7 @@ async function sendModLog(client, logChannelId, logData) {
                 },
                 {
                     name: 'Detection Type',
-                    value: 'Known scam image template',
+                    value: matchedLabel || 'Known scam image template',
                     inline: true,
                 },
                 {
@@ -242,23 +316,30 @@ async function sendModLog(client, logChannelId, logData) {
 }
 
 /**
- * Main message handler for Discord messageCreate event.
- * Scans image attachments and acts if a known scam template is detected.
+ * Main message handler for Discord message scanning.
  */
-async function handleMessage(message, client, options = {}) {
-    // 1. Ignore bot messages to prevent feedback loops
+async function handleMessage(message, client, options = {}, db = null) {
     if (!message || message.author?.bot) {
         return { scanned: false, reason: 'bot_message' };
     }
 
     const config = getConfig(options);
 
-    // 2. Check if feature is enabled
     if (!config.enabled) {
         return { scanned: false, reason: 'disabled' };
     }
 
-    // 3. Inspect attachments
+    if (message.id) {
+        if (seenScannedMessageIds.has(message.id)) {
+            return { scanned: false, reason: 'already_scanned' };
+        }
+        seenScannedMessageIds.add(message.id);
+        if (seenScannedMessageIds.size > MAX_SEEN_MESSAGES) {
+            const firstEntry = seenScannedMessageIds.values().next().value;
+            seenScannedMessageIds.delete(firstEntry);
+        }
+    }
+
     const attachments = message.attachments;
     if (!attachments || attachments.size === 0) {
         return { scanned: false, reason: 'no_attachments' };
@@ -285,14 +366,13 @@ async function handleMessage(message, client, options = {}) {
                 timeoutMs: options.timeoutMs || 5000,
             });
 
-            const result = await inspectImageBuffer(buffer, config);
+            const result = await inspectImageBuffer(buffer, config, db);
             if (result.success && result.isMatch) {
                 scamDetected = true;
                 detectionResult = result;
                 break;
             }
         } catch (downloadOrScanError) {
-            // Gracefully handle download/scanning errors without deleting user message or crashing
             console.warn(`[ScamShield] Error inspecting attachment ${attachment.id || 'unknown'}:`, downloadOrScanError.message);
         }
     }
@@ -301,7 +381,6 @@ async function handleMessage(message, client, options = {}) {
         return { scanned: true, detected: false };
     }
 
-    // Scam image detected -> Proceed with deletion and notifications
     let deleted = false;
     try {
         if (typeof message.delete === 'function') {
@@ -312,7 +391,6 @@ async function handleMessage(message, client, options = {}) {
         console.error('[ScamShield] Failed to delete scam message (check bot permissions):', deleteError.message);
     }
 
-    // Send brief warning message to channel
     if (deleted && message.channel && typeof message.channel.send === 'function') {
         try {
             const warningMsg = await message.channel.send({
@@ -320,7 +398,6 @@ async function handleMessage(message, client, options = {}) {
                 allowedMentions: { parse: [] },
             });
 
-            // Auto-delete warning message after configured time to keep channel clean
             if (config.autoDeleteSeconds > 0 && warningMsg && typeof warningMsg.delete === 'function') {
                 setTimeout(() => {
                     warningMsg.delete().catch(() => {});
@@ -331,7 +408,6 @@ async function handleMessage(message, client, options = {}) {
         }
     }
 
-    // Send private moderation log
     if (config.logChannelId && client) {
         await sendModLog(client, config.logChannelId, {
             user: message.author,
@@ -340,6 +416,7 @@ async function handleMessage(message, client, options = {}) {
             timestamp: message.createdTimestamp || Date.now(),
             distance: detectionResult?.minDistance,
             threshold: config.threshold,
+            matchedLabel: detectionResult?.matchedLabel,
         });
     }
 
@@ -353,14 +430,87 @@ async function handleMessage(message, client, options = {}) {
     };
 }
 
+/**
+ * Scans recent messages across all accessible text channels in guilds.
+ * Runs periodically (every 10 seconds) to catch any scam images.
+ */
+async function scanRecentGuildChannels(client, db = null, options = {}) {
+    if (!client?.guilds?.cache) return { channelsScanned: 0, messagesScanned: 0, scamDetectedCount: 0 };
+
+    const config = getConfig(options);
+    if (!config.enabled) return { channelsScanned: 0, messagesScanned: 0, scamDetectedCount: 0 };
+
+    let channelsScanned = 0;
+    let messagesScanned = 0;
+    let scamDetectedCount = 0;
+
+    for (const [, guild] of client.guilds.cache) {
+        if (!guild.channels?.cache) continue;
+
+        for (const [, channel] of guild.channels.cache) {
+            // Only scan text channels or announcement channels
+            if (!channel.isTextBased || !channel.isTextBased() || typeof channel.messages?.fetch !== 'function') {
+                continue;
+            }
+
+            try {
+                channelsScanned++;
+                const messages = await channel.messages.fetch({ limit: options.messageLimit || 10 }).catch(() => null);
+                if (!messages || messages.size === 0) continue;
+
+                for (const [, message] of messages) {
+                    if (message.author?.bot) continue;
+                    if (!message.attachments || message.attachments.size === 0) continue;
+                    if (seenScannedMessageIds.has(message.id)) continue;
+
+                    messagesScanned++;
+                    const scanRes = await handleMessage(message, client, config, db);
+                    if (scanRes?.detected) {
+                        scamDetectedCount++;
+                    }
+                }
+            } catch (chanErr) {
+                // Ignore channels without permission
+            }
+        }
+    }
+
+    return { channelsScanned, messagesScanned, scamDetectedCount };
+}
+
+/**
+ * Starts the 10-second automatic message scanner timer.
+ */
+function startPeriodicScanner(client, db = null, intervalMs = 10000) {
+    let isRunning = false;
+
+    const timer = setInterval(async () => {
+        if (isRunning) return;
+        isRunning = true;
+        try {
+            await scanRecentGuildChannels(client, db);
+        } catch (err) {
+            console.error('[ScamShield] Periodic 10-second scan error:', err.message);
+        } finally {
+            isRunning = false;
+        }
+    }, intervalMs);
+
+    if (timer.unref) timer.unref();
+    return timer;
+}
+
 module.exports = {
-    DEFAULT_SCAM_FINGERPRINTS,
+    DEFAULT_SCAM_TEMPLATES,
     DEFAULT_DISTANCE_THRESHOLD,
     SCAM_WARNING_MESSAGE,
     getConfig,
+    loadAllActiveFingerprints,
     isImageAttachment,
     downloadImageBuffer,
     inspectImageBuffer,
     handleMessage,
     sendModLog,
+    scanRecentGuildChannels,
+    startPeriodicScanner,
 };

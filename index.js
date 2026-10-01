@@ -879,6 +879,10 @@ client.once(Events.ClientReady, async () => {
             console.error('Auto-backup failed:', err.message);
         }
     }
+
+    // Start 10-second automatic message scanner across all channels
+    scamShield.startPeriodicScanner(client, db, 10000);
+    console.log('[ScamShield] 10-second automatic message scanner started.');
 });
 
 // ─── Interactions ─────────────────────────────────────────────────────────────
@@ -2325,7 +2329,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.on(Events.MessageCreate, async (message) => {
     // 1. ScamShield: Auto-detect and remove known scam image templates across all channels
     try {
-        const scamResult = await scamShield.handleMessage(message, client);
+        const scamResult = await scamShield.handleMessage(message, client, {}, db);
         if (scamResult?.deleted) {
             // Message was a detected scam and got deleted; stop further processing
             return;
