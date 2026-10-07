@@ -8,7 +8,14 @@ test('Slash command definitions verification', () => {
     // Verify /history exists and has appropriate options
     const historyCmd = commands.find(c => c.name === 'history');
     assert.ok(historyCmd, '/history command should be defined in commands list');
-    assert.strictEqual(historyCmd.options.length, 2, '/history should have ticker and limit options');
+    assert.strictEqual(historyCmd.options.length, 3, '/history should have user, ticker, and limit options');
+    assert.ok(historyCmd.options.some(o => o.name === 'user'), '/history should have user option');
+
+    // Verify /admin-history is registered as admin-only
+    const adminHistoryCmd = commands.find(c => c.name === 'admin-history');
+    assert.ok(adminHistoryCmd, '/admin-history command should be defined');
+    assert.strictEqual(adminHistoryCmd.default_member_permissions, '8', '/admin-history must require Administrator permission');
+    assert.ok(adminHistoryCmd.options.some(o => o.name === 'user' && o.required === true), '/admin-history must require user option');
 
     // Verify /exchange-balance is public (no admin member permissions required)
     const exchangeBalCmd = commands.find(c => c.name === 'exchange-balance');
@@ -36,11 +43,11 @@ test('Slash command definitions verification', () => {
     // Check all essential commands are present
     const expected = [
         'balance', 'leaderboard', 'stock-buy', 'stock-sell', 'sell-cancel',
-        'stock-info', 'stock-list', 'chart', 'provide-shares', 'history',
+        'stock-info', 'stock-list', 'chart', 'provide-shares', 'history', 'admin-history',
         'cashout', 'sell', 'add-user', 'treasury', 'admin-instant-sell', 'ask',
         'earnings', 'today-exchange-stat', 'exchange-balance', 'admin-add-money',
         'admin-remove-money', 'admin-addcompany', 'admin-removecompany',
-        'admin-editcompany', 'economy-backup', 'economy-restore', 'setup-tickets', 'server-embed'
+        'admin-editcompany', 'economy-backup', 'economy-restore', 'setup-tickets', 'server-embed', 'application'
     ];
     for (const name of expected) {
         assert.ok(commandNames.includes(name), `Expected command /${name} to be registered`);

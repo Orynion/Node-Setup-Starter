@@ -1,6 +1,7 @@
 const {
     Client,
     GatewayIntentBits,
+    Partials,
     Events,
     PermissionFlagsBits,
     MessageFlags,
@@ -82,6 +83,12 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
+    ],
+    partials: [
+        Partials.Channel,
+        Partials.Message,
+        Partials.User,
     ],
 });
 
@@ -1662,11 +1669,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
         }
 
-        // ── /history ─────────────────────────────────────────────────────────
-        if (commandName === 'history') {
+        // ── /history & /admin-history ────────────────────────────────────────
+        if (commandName === 'history' || commandName === 'admin-history') {
+            const requestedUser = interaction.options.getUser('user');
+            let targetUser = interaction.user;
+
+            if (commandName === 'admin-history') {
+                if (!isAdmin(interaction)) {
+                    return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
+                }
+                targetUser = requestedUser || interaction.user;
+            } else if (requestedUser && requestedUser.id !== interaction.user.id) {
+                if (!isAdmin(interaction)) {
+                    return interaction.editReply({
+                        content: '❌ Only Administrators can view transaction history for other users.',
+                        flags: MessageFlags.Ephemeral,
+                    });
+                }
+                targetUser = requestedUser;
+            }
+
             const requestedTicker = interaction.options.getString('ticker')?.toUpperCase();
             const limit = interaction.options.getInteger('limit') || 10;
-            const userId = interaction.user.id;
+            const userId = targetUser.id;
 
             let tradesQuery;
             let params;
@@ -1693,10 +1718,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (trades.length === 0 && activeOrders.length === 0) {
                 return interaction.editReply({
                     embeds: [{
-                        title: `📜 Transaction History: ${interaction.user.username}`,
+                        title: `📜 Transaction History: ${targetUser.username}`,
                         description: requestedTicker 
                             ? `No recorded transactions found for **${requestedTicker}**.` 
-                            : 'No recorded stock transactions found for your account yet.',
+                            : (targetUser.id === interaction.user.id
+                                ? 'No recorded stock transactions found for your account yet.'
+                                : `No recorded stock transactions found for <@${targetUser.id}>.`),
                         color: 0x5865F2,
                     }],
                 });
@@ -1753,8 +1780,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             return interaction.editReply({
                 embeds: [{
-                    title: `📜 Transaction History: ${interaction.user.username}`,
-                    description: `Wallet Balance: **${fmt(userRecord.wallet_tokens)} tokens**\nCurrent Portfolio: ${holdingSummary}`,
+                    title: `📜 Transaction History: ${targetUser.username}`,
+                    description: `User: <@${targetUser.id}>\nWallet Balance: **${fmt(userRecord.wallet_tokens)} tokens**\nCurrent Portfolio: ${holdingSummary}`,
                     fields,
                     footer: { text: 'IRP Exchange Ledger • Use /stock-sell to list shares' },
                     color: 0x5865F2,
