@@ -370,3 +370,30 @@ test('Staff Review: Accept button assigns Representative role and notifies appli
     assert.ok(messageEdited.embeds[0].description.includes('Accepted'));
 });
 
+test('Staff Review: Representatives and non-admins are rejected from approving applications', async () => {
+    const db = createMockDb();
+    let replyContent = null;
+
+    const mockInteraction = {
+        customId: `app:review:accept:1:applicant_007`,
+        inGuild: () => true,
+        member: {
+            permissions: { has: () => false }, // not admin
+            roles: {
+                cache: new Map([
+                    ['1543952151364116490', { id: '1543952151364116490', name: 'Representative' }],
+                ]),
+            },
+        },
+        reply: async (payload) => {
+            replyContent = payload;
+            return payload;
+        },
+    };
+
+    await applications.handleReviewButton(mockInteraction, db, null);
+    assert.ok(replyContent);
+    assert.ok(replyContent.content.includes('Only Administrators and the Owner'));
+});
+
+

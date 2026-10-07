@@ -435,8 +435,6 @@ async function notifyStaffReview(client, appData) {
         );
 
         await channel.send({
-            content: `<@&${OWNER_ROLE_ID}> <@&${REPRESENTATIVE_ROLE_ID}> New application submitted for review:`,
-            allowedMentions: { roles: [OWNER_ROLE_ID, REPRESENTATIVE_ROLE_ID] },
             embeds: [embed],
             components: [row],
         });
@@ -447,18 +445,28 @@ async function notifyStaffReview(client, appData) {
 
 /**
  * Handles Staff Accept / Reject button clicks on application reviews.
+ * Restricted strictly to Administrators and Owner (Representatives cannot review/approve).
  */
 async function handleReviewButton(interaction, db, client) {
     if (!interaction.inGuild()) {
         return interaction.reply({ content: 'Review buttons can only be used in a server.', flags: MessageFlags.Ephemeral });
     }
 
-    const hasPermission = interaction.member?.permissions?.has(PermissionFlagsBits.Administrator) ||
-        interaction.member?.roles?.cache?.some(r => r.id === OWNER_ROLE_ID || r.id === REPRESENTATIVE_ROLE_ID);
+    const rolesCache = interaction.member?.roles?.cache;
+    const hasOwnerRole = rolesCache ? (
+        (typeof rolesCache.has === 'function' && rolesCache.has(OWNER_ROLE_ID)) ||
+        (typeof rolesCache.some === 'function' && rolesCache.some(r => r.id === OWNER_ROLE_ID)) ||
+        (Array.isArray(rolesCache) && rolesCache.includes(OWNER_ROLE_ID))
+    ) : false;
+
+    const hasPermission = Boolean(
+        (interaction.member?.permissions?.has && interaction.member.permissions.has(PermissionFlagsBits.Administrator)) ||
+        hasOwnerRole
+    );
 
     if (!hasPermission) {
         return interaction.reply({
-            content: '❌ Only Administrators, Owners, or Representatives can review applications.',
+            content: '❌ Only Administrators and the Owner can approve or reject applications.',
             flags: MessageFlags.Ephemeral,
         });
     }
