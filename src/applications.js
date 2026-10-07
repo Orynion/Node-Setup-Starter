@@ -187,86 +187,117 @@ function createApplicationPanelPayload() {
 }
 
 /**
+ * Safely responds to an interaction whether deferred, replied, or fresh.
+ */
+async function safeRespond(interaction, payload) {
+    try {
+        if (interaction.deferred || interaction.replied) {
+            return await interaction.editReply(payload);
+        }
+        return await interaction.reply(payload);
+    } catch (err) {
+        if (err.code === 10062 || err.code === 40060) {
+            // Interaction token expired or already acknowledged
+            return null;
+        }
+        throw err;
+    }
+}
+
+/**
  * Handles the "Apply for Representative" button interaction.
  */
 async function handleApplyButton(interaction, db) {
-    const appState = await getApplicationStatus(db);
-
-    // 1. Check if applications are closed
-    if (!appState.isOpen) {
-        const closedTimestampSec = Math.floor((appState.closedAt || Date.now()) / 1000);
-        return interaction.reply({
-            content: `❌ **Applications are closed as of <t:${closedTimestampSec}:f>** (<t:${closedTimestampSec}:R>).\n\nPlease check back later or wait for an administrator to reopen applications with \`/application status:open\`.`,
-            flags: MessageFlags.Ephemeral,
-        });
-    }
-
-    const userId = interaction.user.id;
-    const username = interaction.user.tag || interaction.user.username;
-
-    // 2. Check if user already has an active pending application
-    if (db) {
-        try {
-            const pending = await db.prepare('SELECT id FROM applications WHERE user_id = ? AND status = ?').get(userId, 'pending');
-            if (pending) {
-                return interaction.reply({
-                    content: 'ℹ️ You already have a pending application under review. Our management team will process it soon.',
-                    flags: MessageFlags.Ephemeral,
-                });
-            }
-        } catch (_) {}
-    }
-
-    // 3. Check if user already has an active DM session
-    if (activeSessions.has(userId)) {
-        return interaction.reply({
-            content: 'ℹ️ You already have an active application session in your Direct Messages! Please check your DMs or reply with `cancel` to restart.',
-            flags: MessageFlags.Ephemeral,
-        });
-    }
-
-    // 4. Try to initiate DM
     try {
-        const firstQuestion = DEFAULT_APPLICATION_QUESTIONS[0];
-        const dmChannel = await interaction.user.createDM();
+        // Immediately defer ephemerally within <50ms to satisfy Discord's 3-second limit
+        if (!interaction.deferred && !interaction.replied) {
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+        }
 
-        await dmChannel.send({
-            embeds: [{
-                title: '💼 LAX Representative Application',
-                description:
-                    `Hello **${interaction.user.username}**! Thank you for applying for the **LAX Representative** role.\n\n` +
-                    `There are **${DEFAULT_APPLICATION_QUESTIONS.length} questions** in total. Please answer each question by typing your response directly in this DM.\n\n` +
-                    `*(Type \`cancel\` at any time if you wish to abort the application)*\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-                    `📋 **Question 1 of ${DEFAULT_APPLICATION_QUESTIONS.length}: ${firstQuestion.title}**\n\n` +
-                    `**${firstQuestion.prompt}**\n\n` +
-                    `*${firstQuestion.placeholder}*`,
-                color: 0x5865F2,
-                footer: { text: 'Type your answer below' },
-            }],
-        });
+        const appState = await getApplicationStatus(db);
 
-        // Register active session
-        activeSessions.set(userId, {
-            userId,
-            username,
-            step: 0,
-            answers: [],
-            guildId: interaction.guildId,
-            channelId: interaction.channelId,
-            startedAt: Date.now(),
-        });
+        // 1. Check if applications are closed
+        if (!appState.isOpen) {
+            const closedTimestampSec = Math.floor((appState.closedAt || Date.now()) / 1000);
+            return safeRespond(interaction, {
+                content: `❌ **Applications are closed as of <t:${closedTimestampSec}:f>** (<t:${closedTimestampSec}:R>).\n\nPlease check back later or wait for an administrator to reopen applications with \`/application status:open\`.`,
+                flags: MessageFlags.Ephemeral,
+            });
+        }
 
-        return interaction.reply({
-            content: '✅ **Application started!** Please check your **Direct Messages (DMs)** to answer the questions.',
+        const userId = interaction.user.id;
+        const username = interaction.user.tag || interaction.user.username;
+
+        // 2. Check if user already has an active pending application
+        if (db) {
+            try {
+                const pending = await db.prepare('SELECT id FROM applications WHERE user_id = ? AND status = ?').get(userId, 'pending');
+                if (pending) {
+                    return safeRespond(interaction, {
+                        content: 'ℹ️ You already have a pending application under review. Our management team will process it soon.',
+                        flags: MessageFlags.Ephemeral,
+                    });
+                }
+            } catch (_) {}
+        }
+
+        // 3. Check if user already has an active DM session
+        if (activeSessions.has(userId)) {
+            return safeRespond(interaction, {
+                content: 'ℹ️ You already have an active application session in your Direct Messages! Please check your DMs or reply with `cancel` to restart.',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+
+        // 4. Try to initiate DM
+        try {
+            const firstQuestion = DEFAULT_APPLICATION_QUESTIONS[0];
+            const dmChannel = await interaction.user.createDM();
+
+            await dmChannel.send({
+                embeds: [{
+                    title: '💼 LAX Representative Application',
+                    description:
+                        `Hello **${interaction.user.username}**! Thank you for applying for the **LAX Representative** role.\n\n` +
+                        `There are **${DEFAULT_APPLICATION_QUESTIONS.length} questions** in total. Please answer each question by typing your response directly in this DM.\n\n` +
+                        `*(Type \`cancel\` at any time if you wish to abort the application)*\n\n` +
+                        `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+                        `📋 **Question 1 of ${DEFAULT_APPLICATION_QUESTIONS.length}: ${firstQuestion.title}**\n\n` +
+                        `**${firstQuestion.prompt}**\n\n` +
+                        `*${firstQuestion.placeholder}*`,
+                    color: 0x5865F2,
+                    footer: { text: 'Type your answer below' },
+                }],
+            });
+
+            // Register active session
+            activeSessions.set(userId, {
+                userId,
+                username,
+                step: 0,
+                answers: [],
+                guildId: interaction.guildId,
+                channelId: interaction.channelId,
+                startedAt: Date.now(),
+            });
+
+            return safeRespond(interaction, {
+                content: '✅ **Application started!** Please check your **Direct Messages (DMs)** to answer the questions.',
+                flags: MessageFlags.Ephemeral,
+            });
+        } catch (dmErr) {
+            console.warn(`[Applications] Failed to DM user ${userId}:`, dmErr.message);
+            return safeRespond(interaction, {
+                content: '❌ **Could not send you a Direct Message.**\n\nPlease enable Direct Messages from server members in your Discord **Privacy & Safety** settings, then click Apply again.',
+                flags: MessageFlags.Ephemeral,
+            });
+        }
+    } catch (err) {
+        console.error('[Applications] Error in handleApplyButton:', err);
+        return safeRespond(interaction, {
+            content: '❌ Something went wrong while starting your application. Please try again.',
             flags: MessageFlags.Ephemeral,
-        });
-    } catch (dmErr) {
-        console.warn(`[Applications] Failed to DM user ${userId}:`, dmErr.message);
-        return interaction.reply({
-            content: '❌ **Could not send you a Direct Message.**\n\nPlease enable Direct Messages from server members in your Discord **Privacy & Safety** settings, then click Apply again.',
-            flags: MessageFlags.Ephemeral,
-        });
+        }).catch(() => {});
     }
 }
 

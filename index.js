@@ -935,16 +935,17 @@ client.once(Events.ClientReady, async () => {
 // ─── Interactions ─────────────────────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async (interaction) => {
-    if (interaction.isButton()) {
-        if (interaction.customId === 'app:apply_rep') {
-            await applications.handleApplyButton(interaction, db);
-            return;
-        }
+    try {
+        if (interaction.isButton()) {
+            if (interaction.customId === 'app:apply_rep') {
+                await applications.handleApplyButton(interaction, db);
+                return;
+            }
 
-        if (interaction.customId.startsWith('app:review:')) {
-            await applications.handleReviewButton(interaction, db, client);
-            return;
-        }
+            if (interaction.customId.startsWith('app:review:')) {
+                await applications.handleReviewButton(interaction, db, client);
+                return;
+            }
 
         if (interaction.customId === 'cashout:open_modal') {
             const modal = new ModalBuilder()
@@ -2529,6 +2530,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const msg = { content: 'Something went wrong. Please try again.', flags: MessageFlags.Ephemeral };
         await interaction.editReply(msg).catch(() => {});
     }
+    } catch (outerErr) {
+        console.error('[InteractionCreate Outer Error]:', outerErr);
+    }
 });
 
 client.on(Events.MessageCreate, async (message) => {
@@ -2570,6 +2574,18 @@ client.on(Events.MessageCreate, async (message) => {
     } catch (error) {
         console.error('Failed to send mention auto-reply:', error);
     }
+});
+
+client.on(Events.Error, (err) => {
+    console.error('[Discord Client Error]:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Process UnhandledRejection]:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('[Process UncaughtException]:', err);
 });
 
 if (process.env.TOKEN) {

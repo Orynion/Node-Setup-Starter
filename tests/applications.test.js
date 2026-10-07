@@ -112,6 +112,13 @@ test('Apply Button: When closed, informs user with closed timestamp and redo ins
     let replyPayload = null;
     const mockInteraction = {
         user: { id: 'user_123', username: 'ApplicantUser' },
+        deferred: false,
+        replied: false,
+        deferReply: async () => { mockInteraction.deferred = true; },
+        editReply: async (payload) => {
+            replyPayload = payload;
+            return payload;
+        },
         reply: async (payload) => {
             replyPayload = payload;
             return payload;
@@ -144,6 +151,13 @@ test('Apply Button: When open, sends DM to start application questionnaire', asy
         },
         channelId: 'chan_general',
         guildId: 'guild_lax',
+        deferred: false,
+        replied: false,
+        deferReply: async () => { mockInteraction.deferred = true; },
+        editReply: async (payload) => {
+            interactionReplied = payload;
+            return payload;
+        },
         reply: async (payload) => {
             interactionReplied = payload;
             return payload;
@@ -174,6 +188,13 @@ test('Apply Button: Handles user with closed DMs gracefully', async () => {
             createDM: async () => {
                 throw new Error('DiscordAPIError[50007]: Cannot send messages to this user');
             },
+        },
+        deferred: false,
+        replied: false,
+        deferReply: async () => { mockInteraction.deferred = true; },
+        editReply: async (payload) => {
+            interactionReplied = payload;
+            return payload;
         },
         reply: async (payload) => {
             interactionReplied = payload;
