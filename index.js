@@ -30,6 +30,7 @@ const treasury = require('./src/treasury.js');
 const ticketUtils = require('./src/ticket-utils.js');
 const { askLaxAi } = require('./src/ai.js');
 const scamShield = require('./src/scam-shield.js');
+const applications = require('./src/applications.js');
 
 
 const deflate = promisify(zlib.deflate);
@@ -84,6 +85,8 @@ const client = new Client({
     ],
 });
 
+const COMPANY_OWNER_ROLE_ID = '1554769304589832284';
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async function ensureInvestorRole(guild, userId) {
@@ -106,6 +109,29 @@ async function ensureInvestorRole(guild, userId) {
         }
     } catch (err) {
         console.warn(`[Investor Role] Could not assign role to user ${userId}:`, err.message);
+    }
+}
+
+async function ensureCompanyOwnerRole(guild, userId) {
+    if (!guild || !userId) return;
+    try {
+        const configuredRoleId = (process.env.COMPANY_OWNER_ROLE_ID || COMPANY_OWNER_ROLE_ID).trim();
+        let targetRole = null;
+        if (configuredRoleId) {
+            targetRole = guild.roles.cache.get(configuredRoleId) || await guild.roles.fetch(configuredRoleId).catch(() => null);
+        }
+        if (!targetRole) {
+            targetRole = guild.roles.cache.find(r => r.name.toLowerCase().includes('company owner') || r.name.toLowerCase().includes('ceo'));
+        }
+        if (targetRole) {
+            const member = await guild.members.fetch(userId).catch(() => null);
+            if (member && !member.roles.cache.has(targetRole.id)) {
+                await member.roles.add(targetRole.id);
+                console.log(`[Company Owner Role] Assigned role "${targetRole.name}" (${targetRole.id}) to company owner ${userId} (${member.user.username}) in guild "${guild.name}".`);
+            }
+        }
+    } catch (err) {
+        console.warn(`[Company Owner Role] Could not assign role to user ${userId}:`, err.message);
     }
 }
 
@@ -883,12 +909,36 @@ client.once(Events.ClientReady, async () => {
     // Start 10-second automatic message scanner across all channels
     scamShield.startPeriodicScanner(client, db, 10000);
     console.log('[ScamShield] 10-second automatic message scanner started.');
+
+    // Automatically ensure all company owners have the Company Owner role (1554769304589832284)
+    try {
+        const companyOwners = await db.prepare('SELECT DISTINCT owner_id FROM companies').all();
+        for (const row of companyOwners) {
+            if (row.owner_id) {
+                for (const [, guild] of client.guilds.cache) {
+                    await ensureCompanyOwnerRole(guild, row.owner_id);
+                }
+            }
+        }
+    } catch (syncErr) {
+        console.warn('[Company Owner Role] Initial sync note:', syncErr.message);
+    }
 });
 
 // ─── Interactions ─────────────────────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
+        if (interaction.customId === 'app:apply_rep') {
+            await applications.handleApplyButton(interaction, db);
+            return;
+        }
+
+        if (interaction.customId.startsWith('app:review:')) {
+            await applications.handleReviewButton(interaction, db, client);
+            return;
+        }
+
         if (interaction.customId === 'cashout:open_modal') {
             const modal = new ModalBuilder()
                 .setCustomId('cashout:submit_modal')
@@ -1836,6 +1886,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             await recordPrice(ticker, price);
 
+            if (interaction.guild) {
+                await ensureCompanyOwnerRole(interaction.guild, owner.id);
+            }
+
             return interaction.editReply({
                 embeds: [{
                     title: `${emoji} New Company Listed!`,
@@ -2319,6 +2373,47 @@ client.on(Events.InteractionCreate, async (interaction) => {
             return;
         }
 
+        // ── /application (Admin Representative Application Management) ──────
+        if (commandName === 'application') {
+            if (!isAdmin(interaction)) {
+                return interaction.editReply({ content: 'Admins only.', flags: MessageFlags.Ephemeral });
+            }
+
+            const status = interaction.options.getString('status');
+            let targetChannel = interaction.options.getChannel('channel');
+            if (!targetChannel) {
+                targetChannel = interaction.guild?.channels?.cache?.get(applications.DEFAULT_APPLICATION_CHANNEL_ID) ||
+                                await interaction.guild?.channels?.fetch(applications.DEFAULT_APPLICATION_CHANNEL_ID).catch(() => null) ||
+                                interaction.channel;
+            }
+
+            if (status === 'open') {
+                await applications.setApplicationStatus(db, 'open');
+
+                if (!targetChannel || !targetChannel.isTextBased || !targetChannel.isTextBased() || typeof targetChannel.send !== 'function') {
+                    return interaction.editReply({
+                        content: '❌ Please specify a valid text channel to post the application panel.',
+                        flags: MessageFlags.Ephemeral,
+                    });
+                }
+
+                const panelPayload = applications.createApplicationPanelPayload();
+                await targetChannel.send(panelPayload);
+
+                return interaction.editReply({
+                    content: `✅ LAX Representative applications are now **OPEN**!\nApplication button panel successfully posted in <#${targetChannel.id}>.`,
+                });
+            }
+
+            if (status === 'close') {
+                const res = await applications.setApplicationStatus(db, 'closed');
+                const closedTimestampSec = Math.floor(res.timestamp / 1000);
+                return interaction.editReply({
+                    content: `🔒 LAX Representative applications have been **CLOSED** as of <t:${closedTimestampSec}:f> (<t:${closedTimestampSec}:R>).\nAny applicant who presses the application button will be informed that applications are closed. Use \`/application status:open\` to reopen.`,
+                });
+            }
+        }
+
     } catch (err) {
         console.error(`Error in /${commandName}:`, err);
         const msg = { content: 'Something went wrong. Please try again.', flags: MessageFlags.Ephemeral };
@@ -2327,6 +2422,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.on(Events.MessageCreate, async (message) => {
+    // 0. Applications: Handle interactive DM questionnaire
+    if (!message.guild && !message.author?.bot) {
+        try {
+            const handled = await applications.handleDirectMessage(message, client, db);
+            if (handled) return;
+        } catch (appErr) {
+            console.error('[Applications] Error handling DM questionnaire:', appErr);
+        }
+    }
+
     // 1. ScamShield: Auto-detect and remove known scam image templates across all channels
     try {
         const scamResult = await scamShield.handleMessage(message, client, {}, db);

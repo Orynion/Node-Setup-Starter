@@ -177,6 +177,23 @@ const commands = [
         .addStringOption(o => o.setName('footer').setDescription('Footer text').setRequired(false).setMaxLength(2048))
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+    new SlashCommandBuilder()
+        .setName('application')
+        .setDescription('Admin: Manage LAX Representative applications (open/close and post panel)')
+        .addStringOption(o => o
+            .setName('status')
+            .setDescription('Set application status to open or close')
+            .setRequired(true)
+            .addChoices(
+                { name: 'Open Applications (Post Panel & Accept DMs)', value: 'open' },
+                { name: 'Close Applications', value: 'close' }
+            ))
+        .addChannelOption(o => o
+            .setName('channel')
+            .setDescription('Channel to post the application button panel (defaults to current channel)')
+            .setRequired(false))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
 ].map(cmd => cmd.toJSON());
 
 async function registerCommands(targetGuildId, clientInstance) {
