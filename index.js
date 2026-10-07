@@ -1690,7 +1690,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
 
             const requestedTicker = interaction.options.getString('ticker')?.toUpperCase();
-            const limit = interaction.options.getInteger('limit') || 10;
+            const limit = interaction.options.getInteger('limit') || 15;
             const userId = targetUser.id;
 
             let tradesQuery;
@@ -1707,57 +1707,102 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 params = [userId, userId, limit];
             }
 
-            const [trades, activeOrders, userRecord] = await Promise.all([
-                db.prepare(tradesQuery).all(...params),
-                db.prepare('SELECT * FROM sell_orders WHERE seller_id = ? ORDER BY timestamp DESC LIMIT 5').all(userId),
+            const [
+                trades,
+                laxTxList,
+                cashouts,
+                userApps,
+                activeOrders,
+                ownedCompanies,
+                userRecord,
+            ] = await Promise.all([
+                db.prepare(tradesQuery).all(...params).catch(() => []),
+                db.prepare(
+                    requestedTicker
+                        ? 'SELECT * FROM lax_transactions WHERE user_id = ? AND ticker = ? ORDER BY timestamp DESC LIMIT ?'
+                        : 'SELECT * FROM lax_transactions WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?'
+                ).all(...(requestedTicker ? [userId, requestedTicker, limit] : [userId, limit])).catch(() => []),
+                db.prepare('SELECT * FROM cashout_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 5').all(userId).catch(() => []),
+                db.prepare('SELECT * FROM applications WHERE user_id = ? ORDER BY created_at DESC LIMIT 5').all(userId).catch(() => []),
+                db.prepare('SELECT * FROM sell_orders WHERE seller_id = ? ORDER BY timestamp DESC LIMIT 5').all(userId).catch(() => []),
+                db.prepare('SELECT * FROM companies WHERE owner_id = ?').all(userId).catch(() => []),
                 getOrCreateUser(userId),
             ]);
 
             const portfolio = getPortfolio(userRecord);
 
-            if (trades.length === 0 && activeOrders.length === 0) {
+            // Merge trade ledger and Treasury instant sells into unified transaction list
+            const unifiedEvents = [];
+
+            for (const t of trades) {
+                const isBuyer = t.buyer_id === userId;
+                const isSeller = t.seller_id === userId;
+                const dateStr = `<t:${Math.floor(t.timestamp / 1000)}:d> <t:${Math.floor(t.timestamp / 1000)}:t>`;
+                const relTime = `<t:${Math.floor(t.timestamp / 1000)}:R>`;
+
+                if (isBuyer && !isSeller) {
+                    const costStr = t.trade_value > 0 ? `${fmt(t.trade_value)} tokens` : 'Provided (0 tokens)';
+                    const feeStr = t.fee_amount > 0 ? ` (fee: ${fmt(t.fee_amount)})` : '';
+                    unifiedEvents.push({
+                        timestamp: t.timestamp,
+                        text: `🟢 **BUY / RECEIVED** • \`${t.ticker}\`\n└ **+${t.shares.toLocaleString()}** shares for **${costStr}**${feeStr} — ${relTime} (${dateStr})`,
+                    });
+                } else if (isSeller && !isBuyer) {
+                    const netEarnings = t.trade_value - t.fee_amount;
+                    const feeStr = t.fee_amount > 0 ? ` (fee: ${fmt(t.fee_amount)})` : '';
+                    unifiedEvents.push({
+                        timestamp: t.timestamp,
+                        text: `🔴 **SOLD (MARKET)** • \`${t.ticker}\`\n└ **-${t.shares.toLocaleString()}** shares for **${fmt(netEarnings)} tokens**${feeStr} — ${relTime} (${dateStr})`,
+                    });
+                } else {
+                    unifiedEvents.push({
+                        timestamp: t.timestamp,
+                        text: `🔄 **TRANSFER** • \`${t.ticker}\`\n└ **${t.shares.toLocaleString()}** shares — ${relTime} (${dateStr})`,
+                    });
+                }
+            }
+
+            for (const tx of laxTxList) {
+                const dateStr = `<t:${Math.floor(tx.timestamp / 1000)}:d> <t:${Math.floor(tx.timestamp / 1000)}:t>`;
+                const relTime = `<t:${Math.floor(tx.timestamp / 1000)}:R>`;
+                unifiedEvents.push({
+                    timestamp: tx.timestamp,
+                    text: `⚡ **INSTANT SELL (TREASURY)** • \`${tx.ticker || 'N/A'}\`\n└ Sold **${tx.shares.toLocaleString()}** shares to Treasury for **${fmt(tx.total_value)} tokens** — ${relTime} (${dateStr})`,
+                });
+            }
+
+            // Sort unified transactions newest first
+            unifiedEvents.sort((a, b) => b.timestamp - a.timestamp);
+
+            const hasAnyActivity = unifiedEvents.length > 0 ||
+                                  activeOrders.length > 0 ||
+                                  cashouts.length > 0 ||
+                                  userApps.length > 0 ||
+                                  ownedCompanies.length > 0 ||
+                                  userRecord.wallet_tokens > 0 ||
+                                  Object.values(portfolio).some(v => v > 0);
+
+            if (!hasAnyActivity) {
                 return interaction.editReply({
                     embeds: [{
-                        title: `📜 Transaction History: ${targetUser.username}`,
+                        title: `📜 Activity & Transaction History: ${targetUser.username}`,
                         description: requestedTicker 
                             ? `No recorded transactions found for **${requestedTicker}**.` 
                             : (targetUser.id === interaction.user.id
-                                ? 'No recorded stock transactions found for your account yet.'
-                                : `No recorded stock transactions found for <@${targetUser.id}>.`),
+                                ? 'No recorded activity or transactions found for your account yet.'
+                                : `No recorded activity or transactions found for <@${targetUser.id}>.`),
                         color: 0x5865F2,
                     }],
                 });
             }
 
-            const historyLines = trades.map(t => {
-                const dateStr = `<t:${Math.floor(t.timestamp / 1000)}:d> <t:${Math.floor(t.timestamp / 1000)}:t>`;
-                const relativeTime = `<t:${Math.floor(t.timestamp / 1000)}:R>`;
-                const isBuyer = t.buyer_id === userId;
-                const isSeller = t.seller_id === userId;
-
-                if (isBuyer && !isSeller) {
-                    const costStr = t.trade_value > 0 ? `${fmt(t.trade_value)} tokens` : 'Provided (0 tokens)';
-                    const feeStr = t.fee_amount > 0 ? ` (fee: ${fmt(t.fee_amount)})` : '';
-                    return `🟢 **BUY / RECEIVED** • \`${t.ticker}\`\n` +
-                           `└ **+${t.shares.toLocaleString()}** shares for **${costStr}**${feeStr} — ${relativeTime} (${dateStr})`;
-                } else if (isSeller && !isBuyer) {
-                    const netEarnings = t.trade_value - t.fee_amount;
-                    const earningsStr = `${fmt(netEarnings)} tokens`;
-                    const feeStr = t.fee_amount > 0 ? ` (fee: ${fmt(t.fee_amount)})` : '';
-                    return `🔴 **SOLD** • \`${t.ticker}\`\n` +
-                           `└ **-${t.shares.toLocaleString()}** shares for **${earningsStr}**${feeStr} — ${relativeTime} (${dateStr})`;
-                } else {
-                    return `🔄 **TRANSFER** • \`${t.ticker}\`\n` +
-                           `└ **${t.shares.toLocaleString()}** shares — ${relativeTime} (${dateStr})`;
-                }
-            });
-
             const fields = [];
 
+            // Active Orders
             if (activeOrders.length > 0 && (!requestedTicker || activeOrders.some(o => o.ticker === requestedTicker))) {
                 const orderLines = activeOrders
                     .filter(o => !requestedTicker || o.ticker === requestedTicker)
-                    .map(o => `⏳ \`${o.ticker}\`: **${o.shares.toLocaleString()}** shares listed at **${fmt(o.list_price)}** tokens/share (<t:${Math.floor(o.timestamp / 1000)}:R>)`);
+                    .map(o => `⏳ \`${o.ticker}\`: **${o.shares.toLocaleString()}** shares @ **${fmt(o.list_price)}** tokens/share (<t:${Math.floor(o.timestamp / 1000)}:R>)`);
                 if (orderLines.length > 0) {
                     fields.push({
                         name: '📋 Active Sell Orders (Pending)',
@@ -1767,23 +1812,61 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 }
             }
 
-            fields.push({
-                name: `Recent Transactions (${trades.length}${requestedTicker ? ` for ${requestedTicker}` : ''})`,
-                value: historyLines.length > 0 ? historyLines.join('\n\n') : 'No completed trades for this filter.',
-                inline: false,
-            });
+            // Cashout requests
+            if (cashouts.length > 0) {
+                const cashoutLines = cashouts.map(c => {
+                    const statusEmoji = c.status === 'completed' || c.status === 'approved' ? '🟢' : (c.status === 'rejected' ? '🔴' : '🟡');
+                    return `${statusEmoji} **#${c.id}**: **${fmt(c.amount)} tokens** (${c.status.toUpperCase()}) — <t:${Math.floor(c.created_at / 1000)}:R>`;
+                });
+                fields.push({
+                    name: '💸 Recent Cashouts',
+                    value: cashoutLines.join('\n'),
+                    inline: false,
+                });
+            }
+
+            // Staff Applications
+            if (userApps.length > 0) {
+                const appLines = userApps.map(a => {
+                    const statusEmoji = a.status === 'accepted' ? '🟢' : (a.status === 'rejected' ? '🔴' : '🟡');
+                    return `${statusEmoji} **Application #${a.id}**: **${a.status.toUpperCase()}** — <t:${Math.floor(a.created_at / 1000)}:R>`;
+                });
+                fields.push({
+                    name: '💼 Staff Applications',
+                    value: appLines.join('\n'),
+                    inline: false,
+                });
+            }
+
+            // Unified transaction timeline
+            if (unifiedEvents.length > 0) {
+                const timelineLines = unifiedEvents.slice(0, limit).map(e => e.text);
+                fields.push({
+                    name: `⚡ Transaction Timeline (${unifiedEvents.length}${requestedTicker ? ` for ${requestedTicker}` : ''})`,
+                    value: timelineLines.join('\n\n'),
+                    inline: false,
+                });
+            }
 
             const portfolioHoldings = Object.entries(portfolio).filter(([_, count]) => count > 0);
             const holdingSummary = portfolioHoldings.length > 0 
                 ? portfolioHoldings.map(([ticker, count]) => `\`${ticker}\`: ${count.toLocaleString()}`).join(' • ')
                 : 'None';
 
+            const companiesSummary = ownedCompanies.length > 0
+                ? ownedCompanies.map(c => `**${c.company_name}** (\`${c.ticker}\`)`).join(', ')
+                : 'None';
+
             return interaction.editReply({
                 embeds: [{
-                    title: `📜 Transaction History: ${targetUser.username}`,
-                    description: `User: <@${targetUser.id}>\nWallet Balance: **${fmt(userRecord.wallet_tokens)} tokens**\nCurrent Portfolio: ${holdingSummary}`,
+                    title: `📜 Activity & Transaction History: ${targetUser.username}`,
+                    description:
+                        `👤 **User:** <@${targetUser.id}> (\`${targetUser.id}\`)\n` +
+                        `💰 **Wallet Balance:** **${fmt(userRecord.wallet_tokens)} tokens**\n` +
+                        `📊 **Portfolio:** ${holdingSummary}\n` +
+                        `🏢 **Owned Companies:** ${companiesSummary}`,
                     fields,
-                    footer: { text: 'IRP Exchange Ledger • Use /stock-sell to list shares' },
+                    footer: { text: 'Los Angeles Exchange • Complete Audit & History' },
                     color: 0x5865F2,
                 }],
             });
