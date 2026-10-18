@@ -96,8 +96,7 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('history')
-        .setDescription('View recent buy/sell transaction history before cashing out')
-        .addUserOption(o => o.setName('user').setDescription('User to view history for (Admins only)').setRequired(false))
+        .setDescription('View your recent buy/sell transaction history before cashing out')
         .addStringOption(o => o.setName('ticker').setDescription('Filter by company ticker symbol').setRequired(false))
         .addIntegerOption(o => o.setName('limit').setDescription('Number of transactions to display (default: 10, max: 25)').setRequired(false).setMinValue(1).setMaxValue(25)),
 

@@ -8,8 +8,8 @@ test('Slash command definitions verification', () => {
     // Verify /history exists and has appropriate options
     const historyCmd = commands.find(c => c.name === 'history');
     assert.ok(historyCmd, '/history command should be defined in commands list');
-    assert.strictEqual(historyCmd.options.length, 3, '/history should have user, ticker, and limit options');
-    assert.ok(historyCmd.options.some(o => o.name === 'user'), '/history should have user option');
+    assert.strictEqual(historyCmd.options.length, 2, '/history should have ticker and limit options');
+    assert.strictEqual(historyCmd.options.some(o => o.name === 'user'), false, '/history should not have user option');
 
     // Verify /admin-history is registered as admin-only
     const adminHistoryCmd = commands.find(c => c.name === 'admin-history');
