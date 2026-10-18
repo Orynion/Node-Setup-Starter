@@ -162,6 +162,85 @@ function fmt(n) {
     return Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function addSafeChunkedFields(fields, baseName, lines, separator = '\n\n', maxChunkLength = 1000) {
+    if (!lines || lines.length === 0) return;
+    let currentChunk = '';
+    let part = 1;
+
+    for (const rawLine of lines) {
+        const line = String(rawLine).slice(0, maxChunkLength);
+        const toAdd = currentChunk ? `${currentChunk}${separator}${line}` : line;
+
+        if (toAdd.length > maxChunkLength) {
+            if (currentChunk) {
+                fields.push({
+                    name: part === 1 ? baseName : `${baseName} (Part ${part})`.slice(0, 256),
+                    value: currentChunk.slice(0, 1024),
+                    inline: false,
+                });
+                part++;
+                currentChunk = line;
+            } else {
+                fields.push({
+                    name: part === 1 ? baseName : `${baseName} (Part ${part})`.slice(0, 256),
+                    value: line.slice(0, 1024),
+                    inline: false,
+                });
+                part++;
+                currentChunk = '';
+            }
+        } else {
+            currentChunk = toAdd;
+        }
+
+        if (fields.length >= 24) break;
+    }
+
+    if (currentChunk && fields.length < 25) {
+        fields.push({
+            name: part === 1 ? baseName : `${baseName} (Part ${part})`.slice(0, 256),
+            value: currentChunk.slice(0, 1024),
+            inline: false,
+        });
+    }
+}
+
+function sanitizeEmbed(embed) {
+    if (!embed) return embed;
+    if (embed.title && embed.title.length > 256) {
+        embed.title = embed.title.slice(0, 253) + '...';
+    }
+    if (embed.description && embed.description.length > 4096) {
+        embed.description = embed.description.slice(0, 4093) + '...';
+    }
+    if (Array.isArray(embed.fields)) {
+        const safeFields = [];
+        for (const f of embed.fields) {
+            if (safeFields.length >= 25) break;
+            const name = (f.name || 'Field').slice(0, 256);
+            const val = String(f.value || 'None');
+            if (val.length <= 1024) {
+                safeFields.push({ name, value: val, inline: Boolean(f.inline) });
+            } else {
+                let remaining = val;
+                let part = 1;
+                while (remaining.length > 0 && safeFields.length < 25) {
+                    const chunk = remaining.slice(0, 1000);
+                    remaining = remaining.slice(1000);
+                    safeFields.push({
+                        name: part === 1 ? name : `${name} (Cont. ${part})`.slice(0, 256),
+                        value: chunk,
+                        inline: false,
+                    });
+                    part++;
+                }
+            }
+        }
+        embed.fields = safeFields.slice(0, 25);
+    }
+    return embed;
+}
+
 function calculateExchangeFee(tradeValue) {
     return Number((tradeValue * EXCHANGE_FEE_RATE).toFixed(8));
 }
@@ -1787,13 +1866,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 const orderLines = activeOrders
                     .filter(o => !requestedTicker || o.ticker === requestedTicker)
                     .map(o => `⏳ \`${o.ticker}\`: **${o.shares.toLocaleString()}** shares @ **${fmt(o.list_price)}** tokens/share (<t:${Math.floor(o.timestamp / 1000)}:R>)`);
-                if (orderLines.length > 0) {
-                    fields.push({
-                        name: '📋 Active Sell Orders (Pending)',
-                        value: orderLines.join('\n'),
-                        inline: false,
-                    });
-                }
+                addSafeChunkedFields(fields, '📋 Active Sell Orders (Pending)', orderLines, '\n');
             }
 
             // Cashout requests
@@ -1802,11 +1875,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     const statusEmoji = c.status === 'completed' || c.status === 'approved' ? '🟢' : (c.status === 'rejected' ? '🔴' : '🟡');
                     return `${statusEmoji} **#${c.id}**: **${fmt(c.amount)} tokens** (${c.status.toUpperCase()}) — <t:${Math.floor(c.created_at / 1000)}:R>`;
                 });
-                fields.push({
-                    name: '💸 Recent Cashouts',
-                    value: cashoutLines.join('\n'),
-                    inline: false,
-                });
+                addSafeChunkedFields(fields, '💸 Recent Cashouts', cashoutLines, '\n');
             }
 
             // Staff Applications
@@ -1815,21 +1884,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     const statusEmoji = a.status === 'accepted' ? '🟢' : (a.status === 'rejected' ? '🔴' : '🟡');
                     return `${statusEmoji} **Application #${a.id}**: **${a.status.toUpperCase()}** — <t:${Math.floor(a.created_at / 1000)}:R>`;
                 });
-                fields.push({
-                    name: '💼 Staff Applications',
-                    value: appLines.join('\n'),
-                    inline: false,
-                });
+                addSafeChunkedFields(fields, '💼 Staff Applications', appLines, '\n');
             }
 
             // Unified transaction timeline
             if (unifiedEvents.length > 0) {
                 const timelineLines = unifiedEvents.slice(0, limit).map(e => e.text);
-                fields.push({
-                    name: `⚡ Transaction Timeline (${unifiedEvents.length}${requestedTicker ? ` for ${requestedTicker}` : ''})`,
-                    value: timelineLines.join('\n\n'),
-                    inline: false,
-                });
+                addSafeChunkedFields(
+                    fields,
+                    `⚡ Transaction Timeline (${unifiedEvents.length}${requestedTicker ? ` for ${requestedTicker}` : ''})`,
+                    timelineLines,
+                    '\n\n'
+                );
             }
 
             const portfolioHoldings = Object.entries(portfolio).filter(([_, count]) => count > 0);
@@ -1842,7 +1908,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 : 'None';
 
             return interaction.editReply({
-                embeds: [{
+                embeds: [sanitizeEmbed({
                     title: `📜 Activity & Transaction History: ${targetUser.username}`,
                     description:
                         `👤 **User:** <@${targetUser.id}> (\`${targetUser.id}\`)\n` +
@@ -1852,7 +1918,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     fields,
                     footer: { text: 'Los Angeles Exchange • Complete Audit & History' },
                     color: 0x5865F2,
-                }],
+                })],
             });
         }
 
@@ -1973,13 +2039,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 const orderLines = activeOrders
                     .filter(o => !requestedTicker || o.ticker === requestedTicker)
                     .map(o => `⏳ \`${o.ticker}\`: **${o.shares.toLocaleString()}** shares @ **${fmt(o.list_price)}** tokens/share (<t:${Math.floor(o.timestamp / 1000)}:R>)`);
-                if (orderLines.length > 0) {
-                    fields.push({
-                        name: '📋 Active Sell Orders (Pending)',
-                        value: orderLines.join('\n'),
-                        inline: false,
-                    });
-                }
+                addSafeChunkedFields(fields, '📋 Active Sell Orders (Pending)', orderLines, '\n');
             }
 
             if (cashouts.length > 0) {
@@ -1987,11 +2047,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     const statusEmoji = c.status === 'completed' || c.status === 'approved' ? '🟢' : (c.status === 'rejected' ? '🔴' : '🟡');
                     return `${statusEmoji} **#${c.id}**: **${fmt(c.amount)} tokens** (${c.status.toUpperCase()}) — <t:${Math.floor(c.created_at / 1000)}:R>`;
                 });
-                fields.push({
-                    name: '💸 Recent Cashouts',
-                    value: cashoutLines.join('\n'),
-                    inline: false,
-                });
+                addSafeChunkedFields(fields, '💸 Recent Cashouts', cashoutLines, '\n');
             }
 
             if (userApps.length > 0) {
@@ -1999,20 +2055,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     const statusEmoji = a.status === 'accepted' ? '🟢' : (a.status === 'rejected' ? '🔴' : '🟡');
                     return `${statusEmoji} **Application #${a.id}**: **${a.status.toUpperCase()}** — <t:${Math.floor(a.created_at / 1000)}:R>`;
                 });
-                fields.push({
-                    name: '💼 Staff Applications',
-                    value: appLines.join('\n'),
-                    inline: false,
-                });
+                addSafeChunkedFields(fields, '💼 Staff Applications', appLines, '\n');
             }
 
             if (unifiedEvents.length > 0) {
                 const timelineLines = unifiedEvents.slice(0, limit).map(e => e.text);
-                fields.push({
-                    name: `⚡ Transaction Timeline (${unifiedEvents.length}${requestedTicker ? ` for ${requestedTicker}` : ''})`,
-                    value: timelineLines.join('\n\n'),
-                    inline: false,
-                });
+                addSafeChunkedFields(
+                    fields,
+                    `⚡ Transaction Timeline (${unifiedEvents.length}${requestedTicker ? ` for ${requestedTicker}` : ''})`,
+                    timelineLines,
+                    '\n\n'
+                );
             }
 
             const portfolioHoldings = Object.entries(portfolio).filter(([_, count]) => count > 0);
@@ -2025,7 +2078,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 : 'None';
 
             return interaction.editReply({
-                embeds: [{
+                embeds: [sanitizeEmbed({
                     title: `📜 Admin Audit History: ${targetUser.username}`,
                     description:
                         `👤 **Target User:** <@${targetUser.id}> (\`${targetUser.id}\`)\n` +
@@ -2035,7 +2088,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     fields,
                     footer: { text: 'Los Angeles Exchange • Admin Audit & Inspection' },
                     color: 0x5865F2,
-                }],
+                })],
             });
         }
 
